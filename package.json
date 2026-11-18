@@ -1,0 +1,14 @@
+{
+  "name": "workmap",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Obsidian 插件：时段笔记 + 四象限 + 日程，和 md 文件双向同步",
+  "main": "main.js",
+  "scripts": {
+    "check": "node --check main.js",
+    "test": "node --check main.js && node test/test.js"
+  },
+  "devDependencies": {
+    "moment": "^2.31.0"
+  }
+}

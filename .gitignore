@@ -1,0 +1,6 @@
+# 个人设置（习惯、时段、顺延记录），不进仓库
+data.json
+
+node_modules/
+package-lock.json
+.DS_Store
