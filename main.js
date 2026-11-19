@@ -465,6 +465,65 @@ function dustLayout(seed, n) {
   return out;
 }
 
+// 横跨「少做或不做 → 尽快处理 → 马上做」的星河。坐标是整个看板的比例（0–1）：
+// 从左边进入「少做或不做」，向下兜过「尽快处理」，再向上穿出「马上做」的顶部，不经过「排时间做」。
+const RIVER = [[-0.05, 0.6], [0.45, 1.0], [0.8, 0.95], [0.86, -0.05]];
+const RIVER_W = 0.026;
+
+function riverAt(t) {
+  const [p0, p1, p2, p3] = RIVER;
+  const u = 1 - t;
+  const b = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+  const d = [-3 * u * u, 3 * u * u - 6 * u * t, 6 * u * t - 3 * t * t, 3 * t * t];
+  const pick = (w, i) => w[0] * p0[i] + w[1] * p1[i] + w[2] * p2[i] + w[3] * p3[i];
+  const dx = pick(d, 0);
+  const dy = pick(d, 1);
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const wob = 0.012 * Math.sin(t * Math.PI * 4.6 + 0.7);
+  return { x: pick(b, 0) + nx * wob, y: pick(b, 1) + ny * wob, nx, ny };
+}
+
+// 星河里的星：越靠河心越密越亮，沿河有几处星团
+function riverLayout(seed, n) {
+  const rand = rng(seed);
+  const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+  const r2 = v => Math.round(v * 100) / 100;
+  const r4 = v => Math.round(v * 10000) / 10000;
+  const knots = [0.2 + rand() * 0.1, 0.48 + rand() * 0.1, 0.78 + rand() * 0.1];
+  const place = (t, off) => {
+    const p = riverAt(t);
+    return { x: r4(p.x + p.nx * off * RIVER_W), y: r4(p.y + p.ny * off * RIVER_W) };
+  };
+  const stars = [];
+  for (let i = 0; i < n; i++) {
+    const t = clamp(rand() < 0.3 ? knots[i % 3] + gauss() * 0.035 : rand(), 0, 1);
+    const off = clamp(gauss(), -3, 3);
+    const core = Math.exp(-off * off / 2);
+    const k = rand();
+    stars.push(Object.assign(place(t, off), {
+      r: r2(0.6 + Math.pow(rand(), 3) * 1.2 + core * 0.4),
+      o: r2(Math.min(1, 0.25 + core * 0.55 + rand() * 0.2)),
+      tone: k < 0.7 ? 0 : k < 0.85 ? 1 : k < 0.93 ? 2 : 3,
+      tw: rand() < 0.14 ? Math.round(rand() * 40) / 10 : -1,
+      bright: false,
+    }));
+  }
+  for (let i = 0; i < 12; i++) {
+    const t = 0.04 + rand() * 0.92;
+    const off = clamp(gauss() * 0.6, -2, 2);
+    stars.push(Object.assign(place(t, off), {
+      r: r2(1.8 + rand() * 0.8),
+      o: 1,
+      tone: rand() < 0.6 ? 0 : 1 + Math.floor(rand() * 3),
+      tw: Math.round(rand() * 40) / 10,
+      bright: true,
+    }));
+  }
+  return stars;
+}
+
 // 「马上做」的火势：0 熄灭，1–3 越来越旺
 function heatOf(tasks, periodTasks) {
   const open = quadList(tasks, 1).filter(t => !t.done);
@@ -1146,6 +1205,9 @@ class MatrixView extends ItemView {
     this.toastEl = null;
     this.toastTimer = null;
     this.fxEl = null;
+    this.gradSeq = 0;
+    this.river = null;
+    this.riverRO = null;
     this.pop = null;
     this.popHit = false;
     this.stats = null;
@@ -1199,6 +1261,7 @@ class MatrixView extends ItemView {
     window.clearTimeout(this.toastTimer);
     if (this.toastEl) this.toastEl.remove();
     if (this.fxEl) this.fxEl.remove();
+    if (this.riverRO) this.riverRO.disconnect();
   }
 
   requestRefresh() {
@@ -1542,6 +1605,7 @@ class MatrixView extends ItemView {
     this.buildTray(el);
     if (!this.settings.hideTips) this.buildTips(el);
     el.scrollTop = scroll;
+    this.placeRivers();
     this.flyPop();
     if (this.popHit) {
       this.pop = null;
@@ -1939,6 +2003,8 @@ class MatrixView extends ItemView {
     for (const c of '不重要') lo.createSpan({ text: c });
     const board = wrap.createDiv('pm-board');
     this.board = board;
+    if (this.riverRO) this.riverRO.disconnect();
+    this.riverRO = null;
     this.skyLayers = {};
     this.skyStars = new Map();
     this.sky = null;
@@ -1984,6 +2050,11 @@ class MatrixView extends ItemView {
         empty.createSpan({ cls: 'pm-qempty-drop', text: '松开放到这里' });
       }
     }
+    if (this.sky) {
+      this.riverRO = new ResizeObserver(() => this.placeRivers());
+      this.riverRO.observe(board);
+      for (const qd of board.children) this.riverRO.observe(qd);
+    }
   }
 
   // ----- 星空 -----
@@ -1991,7 +2062,7 @@ class MatrixView extends ItemView {
   buildSky(qd, q) {
     const sky = qd.createDiv('pm-sky');
     this.skyLayers[q] = sky;
-    if (q === 2 || q === 4) sky.createDiv('pm-sky-band');
+    if (q === 2) sky.createDiv('pm-sky-band');
     if (q === 3) sky.createDiv('pm-sky-moon');
     if (q === 2) sky.createDiv('pm-sky-venus');
     if (q === 1 || q === 2) {
@@ -2005,6 +2076,7 @@ class MatrixView extends ItemView {
       s.style.setProperty('--o', String(d.o));
       s.style.setProperty('--d', d.d + 's');
     }
+    if (q !== 2) this.buildRiver(sky, q);
 
     const lines = this.sky.lines.filter(l => l.q === q);
     if (lines.length) {
@@ -2040,6 +2112,79 @@ class MatrixView extends ItemView {
         this.popHit = true;
       }
       if (!this.skyStars.has(s.raw)) this.skyStars.set(s.raw, el);
+    }
+  }
+
+  // 星河画在整张看板的坐标里，每个象限只显示经过自己的那一段
+  buildRiver(sky, q) {
+    if (!this.river || this.river.key !== this.file.path) {
+      this.river = { key: this.file.path, stars: riverLayout(hashStr(`river|${this.file.path}`), 260) };
+    }
+    const box = sky.createDiv('pm-river');
+    const NS = 'http://www.w3.org/2000/svg';
+    const pts = [];
+    for (let i = 0; i <= 64; i++) {
+      const p = riverAt(i / 64);
+      pts.push(`${(p.x * 1000).toFixed(1)},${(p.y * 1000).toFixed(1)}`);
+    }
+    for (const cls of ['is-glow', 'is-haze']) {
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', `pm-river-band ${cls}`);
+      svg.setAttribute('viewBox', '0 0 1000 1000');
+      svg.setAttribute('preserveAspectRatio', 'none');
+      const id = `pm-river-grad-${++this.gradSeq}`;
+      const defs = document.createElementNS(NS, 'defs');
+      const grad = document.createElementNS(NS, 'linearGradient');
+      grad.setAttribute('id', id);
+      grad.setAttribute('gradientUnits', 'userSpaceOnUse');
+      grad.setAttribute('x1', '0');
+      grad.setAttribute('y1', '600');
+      grad.setAttribute('x2', '860');
+      grad.setAttribute('y2', '0');
+      for (const [off, c] of [['0', 'a'], ['0.5', 'b'], ['1', 'c']]) {
+        const st = document.createElementNS(NS, 'stop');
+        st.setAttribute('offset', off);
+        st.setAttribute('class', `pm-river-stop-${c}`);
+        grad.appendChild(st);
+      }
+      defs.appendChild(grad);
+      svg.appendChild(defs);
+      const pl = document.createElementNS(NS, 'polyline');
+      pl.setAttribute('points', pts.join(' '));
+      pl.setAttribute('vector-effect', 'non-scaling-stroke');
+      pl.setAttribute('stroke', `url(#${id})`);
+      svg.appendChild(pl);
+      box.appendChild(svg);
+    }
+    const inQ = s => (q === 3 ? s.x < 0.56 : s.x > 0.44) && (q === 1 ? s.y < 0.56 : s.y > 0.44);
+    for (const s of this.river.stars) {
+      if (!inQ(s)) continue;
+      const el = box.createSpan('pm-rstar' + (s.bright ? ' is-bright' : ''));
+      el.dataset.tone = String(s.tone);
+      el.style.left = (s.x * 100).toFixed(2) + '%';
+      el.style.top = (s.y * 100).toFixed(2) + '%';
+      el.style.setProperty('--sz', s.r + 'px');
+      el.style.setProperty('--o', String(s.o));
+      if (s.tw >= 0) {
+        el.addClass('is-tw');
+        el.style.setProperty('--tw', s.tw + 's');
+      }
+      if (s.bright) el.createSpan('pm-star-spark');
+    }
+  }
+
+  placeRivers() {
+    const b = this.board;
+    if (!b || !b.isConnected) return;
+    const br = b.getBoundingClientRect();
+    for (const sky of Object.values(this.skyLayers || {})) {
+      const r = sky.querySelector('.pm-river');
+      if (!r) continue;
+      const sr = sky.getBoundingClientRect();
+      r.style.left = (br.left - sr.left) + 'px';
+      r.style.top = (br.top - sr.top) + 'px';
+      r.style.width = br.width + 'px';
+      r.style.height = br.height + 'px';
     }
   }
 
@@ -2861,6 +3006,8 @@ module.exports._test = {
   rng,
   skyLayout,
   dustLayout,
+  riverAt,
+  riverLayout,
   parsePeriod,
   defaultEnd,
   splitLines,

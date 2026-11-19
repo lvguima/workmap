@@ -197,6 +197,8 @@ app.vault.process(file, data => {
 
 视图里，每个象限的第一个子元素是 `.pm-sky`（`position: absolute`，`z-index: 0`），标题和列表提升到 `z-index: 1`。连线用一个 `viewBox="0 0 100 100"`、`preserveAspectRatio="none"` 的 SVG 画，加上 `vector-effect: non-scaling-stroke`，象限怎么拉伸线宽都不变；星星本身用 `left/top` 百分比定位的 div，所以不会被拉成椭圆。
 
+星河用整张看板的坐标（0–1）描述：一条三次贝塞尔曲线（`RIVER`），再沿法线方向加一点正弦起伏（`riverAt`）。`riverLayout` 用文件路径作种子生成星点：沿曲线位置均匀分布，另有 30% 聚在 3 个星团附近；偏离河心的距离服从正态分布，越靠河心越亮。每个象限各放一份 `.pm-river`，`placeRivers()` 把它的左上角和尺寸对齐到整张看板（用 ResizeObserver 跟随尺寸变化），再被象限自己的 `overflow: hidden` 裁掉，所以四块天空之间有间隙，星河却是连续的。光带是同一条折线画两遍：一遍粗而模糊的辉光，一遍细的河心。
+
 流星特效沿用 4.7 的思路：打勾时把勾选圈的位置存进 `pop.from`；重建后，`render` 末尾的 `flyPop()` 找到对应的新星，在 `.pm-fx-layer` 上画一颗从旧位置飞向新星的光点，新星带 `is-born` 延迟 0.5 秒亮起。`pop.flown` 保证只飞一次。偶尔划过的流星是每 9 秒一次的定时器，只在深色、开启动画、页面可见时随机出现。
 
 ## 5. 测试
