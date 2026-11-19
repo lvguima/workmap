@@ -93,6 +93,7 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
 {
   hideDone, habits, slots, theme, size,
   hideTips,                 // 操作提示是否已关闭
+  fx,                       // 趣味动画开关
   carry: { date, dismissed, items: [{ raw, text, from }] }  // 当天的顺延记录
 }
 ```
