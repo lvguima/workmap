@@ -2681,3 +2681,212 @@
   .pm-skin .pm-rstar,
   .pm-skin .pm-sky-dust span { animation: none !important; }
 }
+
+/* =========================================================
+   深空主题（随「星空背景」开启 → .pm-space）
+   深色是深空，浅色是黄昏。整页背景、卡片、日程都换成同一套天空的配色。
+   ========================================================= */
+
+.pm-skin.pm-space.pm-dark {
+  --pm-bg: #080b1d;
+  --pm-bg-glass: rgba(8, 11, 29, 0.62);
+  --pm-surface: rgba(24, 30, 68, 0.52);
+  --pm-surface-2: rgba(34, 41, 88, 0.6);
+  --pm-sunken: rgba(140, 152, 255, 0.14);
+  --pm-sunken-2: rgba(140, 152, 255, 0.075);
+  --pm-border: rgba(170, 180, 255, 0.1);
+  --pm-border-strong: rgba(170, 180, 255, 0.22);
+  --pm-text: #f1f2ff;
+  --pm-text-2: #b2b7d8;
+  --pm-text-3: #6f7499;
+  --pm-accent: #7d8cff;
+  --pm-accent-strong: #a0abff;
+  --pm-shadow: 0 0 0 0.5px rgba(160, 172, 255, 0.13), 0 6px 22px rgba(0, 0, 18, 0.45);
+  --pm-shadow-lift: 0 18px 50px rgba(0, 0, 20, 0.7), 0 0 0 0.5px rgba(170, 180, 255, 0.22);
+}
+
+.pm-skin.pm-space.pm-light {
+  --pm-bg: #f2eefb;
+  --pm-bg-glass: rgba(240, 235, 251, 0.66);
+  --pm-surface: rgba(255, 255, 255, 0.66);
+  --pm-surface-2: rgba(255, 255, 255, 0.8);
+  --pm-sunken: rgba(110, 90, 190, 0.1);
+  --pm-sunken-2: rgba(110, 90, 190, 0.06);
+  --pm-border: rgba(90, 70, 160, 0.1);
+  --pm-border-strong: rgba(90, 70, 160, 0.2);
+  --pm-text-2: #6c6683;
+  --pm-text-3: #a39dba;
+  --pm-accent: #6a5cff;
+  --pm-accent-strong: #5241e6;
+  --pm-shadow: 0 0.5px 1px rgba(70, 50, 140, 0.05), 0 4px 16px rgba(110, 80, 170, 0.09);
+}
+
+/* 整页背景层：在内容后面，不随滚动 */
+.workspace-leaf-content.pm-has-space[data-type="workmap-view"] > .view-content.pm-view {
+  position: relative;
+  z-index: 1;
+  background: transparent !important;
+}
+
+.pm-space-bg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pm-space-bg.pm-dark {
+  background:
+    radial-gradient(55% 45% at 88% 0%, rgba(118, 84, 230, 0.24), transparent 70%),
+    radial-gradient(45% 40% at 0% 32%, rgba(40, 96, 210, 0.18), transparent 70%),
+    radial-gradient(60% 45% at 62% 108%, rgba(206, 72, 150, 0.13), transparent 70%),
+    linear-gradient(180deg, #05071a 0%, #090d27 55%, #0c0f2c 100%);
+}
+
+.pm-space-bg.pm-light {
+  background:
+    radial-gradient(55% 40% at 90% 0%, rgba(170, 150, 255, 0.28), transparent 70%),
+    radial-gradient(70% 45% at 50% 112%, rgba(255, 178, 120, 0.38), rgba(255, 160, 150, 0.12) 50%, transparent 75%),
+    linear-gradient(180deg, #e6e2fa 0%, #efe8f8 50%, #fbece6 100%);
+}
+
+/* 慢慢漂移的星云 */
+.pm-space-nebula {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(28% 22% at 30% 40%, rgba(96, 120, 255, 0.1), transparent 70%),
+    radial-gradient(24% 20% at 72% 62%, rgba(190, 90, 220, 0.09), transparent 70%);
+  filter: blur(20px);
+}
+
+.pm-space-bg.pm-light .pm-space-nebula { opacity: 0.6; }
+
+.pm-space-bg.pm-fx .pm-space-nebula { animation: pm-nebula-drift 60s ease-in-out infinite alternate; }
+
+@keyframes pm-nebula-drift {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(4%, -3%) scale(1.08); }
+}
+
+.pm-space-bg .pm-sky-dust span { background: #e4e8ff; }
+
+/* 顶部：深色半透明玻璃 */
+.pm-skin.pm-space .pm-hero {
+  border-bottom-color: var(--pm-border);
+}
+
+.pm-skin.pm-space.pm-dark h1.pm-title {
+  background: linear-gradient(100deg, #ffffff 30%, #c6cdff 75%, #e6c4ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.pm-skin.pm-space .pm-pprog-fill {
+  background: linear-gradient(90deg, var(--pm-accent), #c08bff);
+}
+
+.pm-skin.pm-space.pm-dark .pm-pprog-fill { box-shadow: 0 0 8px rgba(140, 130, 255, 0.6); }
+.pm-skin.pm-space.pm-dark .pm-pprog-mark { box-shadow: 0 0 8px 2px rgba(200, 205, 255, 0.7); }
+
+.pm-skin.pm-space.pm-dark .pm-badge { box-shadow: 0 0 10px rgba(125, 140, 255, 0.55); }
+
+/* 玻璃面板：半透明，背后的星空柔化 */
+.pm-skin.pm-space .pm-pcard,
+.pm-skin.pm-space .pm-habit,
+.pm-skin.pm-space .pm-composer,
+.pm-skin.pm-space .pm-timeline,
+.pm-skin.pm-space .pm-tray,
+.pm-skin.pm-space .pm-tips,
+.pm-skin.pm-space .pm-carry {
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  backdrop-filter: blur(10px) saturate(140%);
+}
+
+.pm-skin.pm-space .pm-tray,
+.pm-skin.pm-space .pm-tips {
+  background: var(--pm-sunken-2);
+  box-shadow: inset 0 0 0 0.5px var(--pm-border);
+}
+
+.pm-skin.pm-space.pm-dark .pm-pcard:hover {
+  box-shadow: var(--pm-shadow), 0 8px 28px rgba(80, 90, 220, 0.22), inset 0 0 0 0.5px rgba(170, 180, 255, 0.25);
+}
+
+.pm-skin.pm-space.pm-dark .pm-pcard[data-level="3"] {
+  box-shadow: var(--pm-shadow), inset 0 0 0 1px color-mix(in srgb, var(--pm-star) 30%, transparent), 0 0 18px color-mix(in srgb, var(--pm-star) 14%, transparent);
+}
+
+.pm-skin.pm-space.pm-dark .pm-habit.is-on {
+  box-shadow: var(--pm-shadow), 0 0 12px color-mix(in srgb, var(--pm-green) 22%, transparent);
+}
+
+.pm-skin.pm-space.pm-dark .pm-composer:focus-within {
+  box-shadow: var(--pm-shadow), 0 0 0 3px var(--pm-accent-line), 0 0 22px rgba(125, 140, 255, 0.3);
+}
+
+.pm-skin.pm-space .pm-seg { background: var(--pm-sunken); }
+.pm-skin.pm-space.pm-light .pm-seg button.pm-seg-mid { background: rgba(255, 255, 255, 0.9); }
+
+/* 日程：「现在」是一道发光的线 */
+.pm-skin.pm-space.pm-dark .pm-slot.is-now {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--pm-red) 10%, transparent), transparent 80%);
+}
+
+.pm-skin.pm-space.pm-dark .pm-slot.is-now::before {
+  opacity: 1;
+  background: linear-gradient(90deg, var(--pm-red), color-mix(in srgb, var(--pm-red) 10%, transparent));
+  box-shadow: 0 0 6px var(--pm-red);
+}
+
+.pm-skin.pm-space.pm-dark .pm-slot.is-now::after {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--pm-red) 30%, transparent), 0 0 10px 2px var(--pm-red);
+}
+
+.pm-skin.pm-space.pm-dark.pm-fx .pm-slot.is-now::after {
+  animation: pm-now-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pm-now-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--pm-red) 30%, transparent), 0 0 8px 1px var(--pm-red); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--pm-red) 12%, transparent), 0 0 14px 3px var(--pm-red); }
+}
+
+/* 顺延提示 */
+.pm-skin.pm-space.pm-dark .pm-carry {
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--pm-orange) 16%, transparent), transparent 60%),
+    var(--pm-surface);
+}
+
+/* 拖动时的卡片、撤销提示、弹窗 */
+.pm-ghost-host.pm-space.pm-dark .pm-ghost { background: #1b2150 !important; }
+.pm-ghost-host.pm-space.pm-light .pm-ghost { background: #fbf9ff !important; }
+
+.pm-toast.pm-space.pm-dark {
+  background: rgba(14, 18, 46, 0.86);
+  box-shadow: 0 10px 34px rgba(0, 0, 20, 0.5), 0 0 0 0.5px rgba(170, 180, 255, 0.2), 0 0 24px rgba(110, 120, 255, 0.15);
+}
+
+.pm-toast.pm-space.pm-dark button.pm-toast-btn { color: #a9b4ff; background: rgba(140, 152, 255, 0.16); }
+
+.modal.pm-modal.pm-space.pm-dark {
+  background:
+    radial-gradient(80% 60% at 100% 0%, rgba(118, 84, 230, 0.2), transparent 70%),
+    radial-gradient(70% 50% at 0% 100%, rgba(40, 96, 210, 0.14), transparent 70%),
+    #0a0d24;
+  box-shadow: var(--pm-shadow-lift), 0 0 40px rgba(90, 100, 230, 0.15);
+}
+
+.modal.pm-modal.pm-space.pm-light {
+  background: linear-gradient(180deg, #f1edfc, #fbf0ec);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-space-nebula,
+  .pm-skin .pm-slot.is-now::after { animation: none !important; }
+}

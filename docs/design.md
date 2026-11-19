@@ -201,6 +201,8 @@ app.vault.process(file, data => {
 
 每个象限的天空里有一个 `canvas.pm-galaxy`，`placeRivers()` 把离屏图按「看板左上角相对于象限的偏移」画进去，所以四块天空之间有间隙，银河却是连续的。亮星是 DOM 元素（要做闪烁动画），放在同样对齐到整张看板的 `.pm-river` 里。尺寸变化由 ResizeObserver 触发，合并到下一帧再重画。
 
+开启星空背景时，`applySkin` 还会加上 `.pm-space`，CSS 在这个类下重写 `--pm-bg`、`--pm-surface` 等主题变量，所以卡片、日程等面板不需要逐个改写，只是变成半透明，再加 `backdrop-filter` 柔化背后的星空。整页背景是 `buildSpace()` 在视图容器里插入的 `.pm-space-bg`，放在 `.view-content` 后面（`.view-content` 的背景改为透明），不随内容滚动；里面的星星复用 `dustLayout`，和象限里的微尘由同一个 `fillDust` 生成。流星有 30% 的概率落在整页背景上。
+
 流星特效沿用 4.7 的思路：打勾时把勾选圈的位置存进 `pop.from`；重建后，`render` 末尾的 `flyPop()` 找到对应的新星，在 `.pm-fx-layer` 上画一颗从旧位置飞向新星的光点，新星带 `is-born` 延迟 0.5 秒亮起。`pop.flown` 保证只飞一次。偶尔划过的流星是每 6 秒一次的定时器（75% 概率出现），只在深色、开启动画、页面可见时随机出现。
 
 ## 5. 测试

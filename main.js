@@ -754,6 +754,7 @@ function applySkin(el, plugin) {
   el.classList.add(dark ? 'pm-dark' : 'pm-light');
   el.style.fontSize = (SIZES[plugin.settings.size] || SIZES.m) + 'px';
   el.classList.toggle('pm-fx', !!plugin.settings.fx);
+  el.classList.toggle('pm-space', !!plugin.settings.sky);
 }
 
 function iconBtn(parent, icon, label, cls) {
@@ -1309,6 +1310,7 @@ class MatrixView extends ItemView {
     this.toastEl = null;
     this.toastTimer = null;
     this.fxEl = null;
+    this.spaceEl = null;
     this.gradSeq = 0;
     this.galaxy = null;
     this.riverRO = null;
@@ -1368,6 +1370,7 @@ class MatrixView extends ItemView {
     if (this.fxEl) this.fxEl.remove();
     if (this.riverRaf) window.cancelAnimationFrame(this.riverRaf);
     if (this.riverRO) this.riverRO.disconnect();
+    if (this.spaceEl) this.spaceEl.remove();
   }
 
   requestRefresh() {
@@ -1657,6 +1660,7 @@ class MatrixView extends ItemView {
     const scroll = el.scrollTop;
     el.empty();
     applySkin(el, this.plugin);
+    this.buildSpace();
     if (this.renderComp) this.removeChild(this.renderComp);
     this.renderComp = this.addChild(new Component());
 
@@ -2174,15 +2178,7 @@ class MatrixView extends ItemView {
       for (let i = 0; i < 2; i++) sky.createDiv('pm-sky-cloud').style.setProperty('--i', String(i));
     }
     const dust = sky.createDiv('pm-sky-dust');
-    for (const d of dustLayout(hashStr(`${this.file.path}|${q}`), 46)) {
-      const s = dust.createSpan((d.big || d.glint ? 'is-big' : '') + (d.tw || d.glint ? ' is-tw' : '') + (d.glint ? ' is-glint' : ''));
-      s.style.setProperty('--dur', d.dur + 's');
-      if (d.glint) s.createSpan('pm-star-spark');
-      s.style.left = d.x + '%';
-      s.style.top = d.y + '%';
-      s.style.setProperty('--o', String(d.o));
-      s.style.setProperty('--d', d.d + 's');
-    }
+    this.fillDust(dust, hashStr(`${this.file.path}|${q}`), 46);
     this.buildRiver(sky);
 
     const lines = this.sky.lines.filter(l => l.q === q);
@@ -2220,6 +2216,38 @@ class MatrixView extends ItemView {
       }
       if (!this.skyStars.has(s.raw)) this.skyStars.set(s.raw, el);
     }
+  }
+
+  fillDust(el, seed, n) {
+    for (const d of dustLayout(seed, n)) {
+      const s = el.createSpan((d.big || d.glint ? 'is-big' : '') + (d.tw || d.glint ? ' is-tw' : '') + (d.glint ? ' is-glint' : ''));
+      s.style.setProperty('--dur', d.dur + 's');
+      if (d.glint) s.createSpan('pm-star-spark');
+      s.style.left = d.x + '%';
+      s.style.top = d.y + '%';
+      s.style.setProperty('--o', String(d.o));
+      s.style.setProperty('--d', d.d + 's');
+    }
+  }
+
+  // 整页的深空背景：放在内容后面，不随滚动移动
+  buildSpace() {
+    const host = this.containerEl;
+    const on = !!this.settings.sky;
+    host.toggleClass('pm-has-space', on);
+    if (!on) {
+      if (this.spaceEl) this.spaceEl.remove();
+      this.spaceEl = null;
+      return;
+    }
+    if (!this.spaceEl || !this.spaceEl.isConnected) {
+      this.spaceEl = createDiv('pm-space-bg');
+      host.insertBefore(this.spaceEl, this.contentEl);
+      this.spaceEl.createDiv('pm-space-nebula');
+      this.fillDust(this.spaceEl.createDiv('pm-sky-dust'), hashStr('workmap|space'), 200);
+    }
+    applySkin(this.spaceEl, this.plugin);
+    this.spaceEl.style.top = this.contentEl.offsetTop + 'px';
   }
 
   // 银河画在整张看板的坐标里，每个象限只显示经过自己的那一段
@@ -2336,7 +2364,8 @@ class MatrixView extends ItemView {
     if (Math.random() < 0.25) return;
     const skies = Object.values(this.skyLayers || {}).filter(s => s.isConnected);
     if (!skies.length) return;
-    const sky = skies[Math.floor(Math.random() * skies.length)];
+    const bg = this.spaceEl && this.spaceEl.isConnected && Math.random() < 0.3;
+    const sky = bg ? this.spaceEl : skies[Math.floor(Math.random() * skies.length)];
     const m = sky.createDiv('pm-meteor');
     m.style.left = (40 + Math.random() * 55) + '%';
     m.style.top = (Math.random() * 50) + '%';
