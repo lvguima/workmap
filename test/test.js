@@ -181,4 +181,42 @@ assert.deepStrictEqual(st, {
   periodDone: 2, periodTotal: 2, dailyDone: 2, dailyTotal: 3,
   checkins: 4, best: { name: 'a', n: 2 }, nth: 3, total: 13,
 });
+// sky
+assert.strictEqual(T.hashStr('abc'), T.hashStr('abc'));
+assert.notStrictEqual(T.hashStr('abc'), T.hashStr('abd'));
+const ra = T.rng(42); const rb = T.rng(42);
+for (let i = 0; i < 5; i++) { const v = ra(); assert.strictEqual(v, rb()); assert.ok(v >= 0 && v < 1); }
+const sd = (line, day, text, x, y, done, parent) => ({ line, day, text, x, y, done, parent, raw: `r${line}` });
+const spt = [{ id: 'pA', level: 3, text: '论文' }, { id: 'pB', level: 1, text: '调研' }];
+const sk = [
+  sd(1, 18, 'a', 75, 20, true, 'pA'),
+  sd(2, 18, 'b', 75, 30, true, 'pA'),
+  sd(3, 19, 'c', 25, 20, true, 'pB'),
+  sd(4, 19, 'a', 75, 25, true, 'pA'),
+  sd(5, 19, 'd', 75, 80, false),
+  sd(6, 20, 'e', 75, 20, true),
+  sd(7, 19, 'f', null, null, true),
+];
+const L1 = T.skyLayout(sk, spt, 19);
+assert.strictEqual(L1.stars.length, 4); // 未完成、没放象限、晚于查看日的不算
+assert.deepStrictEqual(L1.stars.map(s => s.q), [1, 1, 2, 1]);
+assert.strictEqual(L1.stars[0].level, 3);
+assert.strictEqual(L1.stars[2].name, '调研');
+assert.deepStrictEqual(L1.stars.map(s => s.today), [false, false, true, true]);
+assert.deepStrictEqual(L1.lines.map(l => [l.q, l.parent, l.pts.length]), [[1, 'pA', 3]]);
+for (const s of L1.stars) assert.ok(s.x >= 6 && s.x <= 94 && s.y >= 8 && s.y <= 92);
+// 确定性，且之后再完成任务不会挪动之前的星星
+assert.deepStrictEqual(T.skyLayout(sk, spt, 19), L1);
+const L2 = T.skyLayout(sk, spt, 20);
+for (let i = 0; i < 4; i++) assert.deepStrictEqual([L2.stars[i].x, L2.stars[i].y], [L1.stars[i].x, L1.stars[i].y]);
+const L3 = T.skyLayout([...sk, sd(8, 19, 'g', 75, 40, true)], spt, 19);
+for (const s of L1.stars.filter(s => s.day < 19)) {
+  const m = L3.stars.find(x => x.key === s.key);
+  assert.deepStrictEqual([m.x, m.y], [s.x, s.y]);
+}
+// 同名同日的两条任务各有一颗星
+const dupL = T.skyLayout([sd(1, 18, 'x', 75, 20, true), sd(2, 18, 'x', 75, 22, true)], [], 18);
+assert.notStrictEqual(dupL.stars[0].key, dupL.stars[1].key);
+assert.deepStrictEqual(T.dustLayout(7, 10), T.dustLayout(7, 10));
+assert.strictEqual(T.dustLayout(7, 10).length, 10);
 console.log('ALL PASS');

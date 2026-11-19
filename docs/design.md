@@ -94,6 +94,7 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
   hideDone, habits, slots, theme, size,
   hideTips,                 // 操作提示是否已关闭
   fx,                       // 趣味动画开关
+  sky,                      // 星空背景开关
   carry: { date, dismissed, items: [{ raw, text, from }] }  // 当天的顺延记录
 }
 ```
@@ -185,6 +186,19 @@ app.vault.process(file, data => {
 
 所有动画都在 `.pm-fx` 下才生效（`applySkin` 根据 `settings.fx` 加上这个类）。`fxOn()` 还会检查 `prefers-reduced-motion`，CSS 里也有对应的 `@media` 兜底。
 
+### 4.8 星空背景
+
+`skyLayout(allDaily, periodTasks, viewDay)` 是纯函数，输出 `{ stars, lines }`：
+
+1. 取本期里已完成、有象限、日期不晚于查看日的每日任务，按日期和行号排序。
+2. 每颗星的键是 `日期|文本|同名序号`。用 FNV-1a 哈希这个键作为 mulberry32 的种子，在象限内（x 6–94，y 8–92，单位是百分比）生成 6 个候选点，取离「更早日子的星星」最远的那个。只避开更早的日子，所以当天新完成的任务不会让已有的星星移动；不依赖行号，所以在笔记里增删行也不会。
+3. 星星记下所属周期任务的星级（决定大小）、是否是查看日当天（闪烁）、距今几天（透明度）。
+4. 同一象限、同一周期任务下有 2 颗以上星星时，按顺序连成一条折线。
+
+视图里，每个象限的第一个子元素是 `.pm-sky`（`position: absolute`，`z-index: 0`），标题和列表提升到 `z-index: 1`。连线用一个 `viewBox="0 0 100 100"`、`preserveAspectRatio="none"` 的 SVG 画，加上 `vector-effect: non-scaling-stroke`，象限怎么拉伸线宽都不变；星星本身用 `left/top` 百分比定位的 div，所以不会被拉成椭圆。
+
+流星特效沿用 4.7 的思路：打勾时把勾选圈的位置存进 `pop.from`；重建后，`render` 末尾的 `flyPop()` 找到对应的新星，在 `.pm-fx-layer` 上画一颗从旧位置飞向新星的光点，新星带 `is-born` 延迟 0.5 秒亮起。`pop.flown` 保证只飞一次。偶尔划过的流星是每 9 秒一次的定时器，只在深色、开启动画、页面可见时随机出现。
+
 ## 5. 测试
 
 `test/test.js` 用 Node 直接运行。它替换了 `require('obsidian')`（用 `moment` 加一个空类代理），然后只测试 `_test` 导出的纯函数，包括：
@@ -193,7 +207,8 @@ app.vault.process(file, data => {
 - 备注缩进、插入位置、`ensureDay` 的排序；
 - 习惯解析（带空格和 emoji）、连续天数；
 - 象限归属、列表排序、`spreadY`、`endPos`、`reorderPatches`（同象限排序、跨象限移动、从待放置拖入）；
-- 火势 `heatOf`、最长连续 `longestStreak`、本期战绩 `periodStats`。
+- 火势 `heatOf`、最长连续 `longestStreak`、本期战绩 `periodStats`；
+- 星空 `skyLayout`：过滤规则、星级与星座、确定性，以及新增任务后旧星星不移动。
 
 视图和交互没有自动化测试，需要在 Obsidian 里手动检查。
 
@@ -219,5 +234,4 @@ npm install && npm test
 - **month_plan 联动**：读取 Full Calendar 的事件，显示在日程里，或者把带日程时段的任务同步过去。
 - **快捷键**：N 新建、←/→ 切换日期、T 回到今天。
 - 跨月的一期。
-- **星空顶**：已完成的任务变成象限背景里的星星（设计中）。
 - **番茄钟**：专注计时，时长写回 md。

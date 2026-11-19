@@ -43,6 +43,7 @@ const DEFAULT_SETTINGS = {
   hideTips: false,
   carry: null,
   fx: true,
+  sky: true,
 };
 
 // x/y 仍写进 %%m:x,y%%：x、y 决定象限，y 同时决定象限内的排序
@@ -361,6 +362,106 @@ function reorderPatches(tasks, task, q, index) {
     const x = t === task && !inQuad ? QUADS[q].x : t.x;
     if (t.x !== x || t.y !== ys[k]) out.push({ task: t, patch: { x, y: ys[k] } });
   });
+  return out;
+}
+
+// ---------- 星空 ----------
+
+function hashStr(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SKY_BOX = { x0: 6, x1: 94, y0: 8, y1: 92 };
+
+// 已完成的每日任务 → 所在象限里的星星。位置由「日期|文本|第几个同名」哈希决定，
+// 只避开更早日子的星星，所以今天再完成任务也不会挪动已有的星星。
+function skyLayout(tasks, periodTasks, viewDay) {
+  const done = tasks
+    .filter(t => t.done && t.x != null && t.day != null && t.day <= viewDay)
+    .sort((a, b) => a.day - b.day || a.line - b.line);
+  const seen = new Map();
+  const placed = { 1: [], 2: [], 3: [], 4: [] };
+  const stars = [];
+  const r2 = v => Math.round(v * 100) / 100;
+  for (const t of done) {
+    const base = `${t.day}|${t.text}`;
+    const dup = seen.get(base) || 0;
+    seen.set(base, dup + 1);
+    const key = `${base}|${dup}`;
+    const q = quadOf(t);
+    const rand = rng(hashStr(key));
+    const older = placed[q].filter(s => s.day < t.day);
+    let best = null;
+    let bestD = -1;
+    for (let i = 0; i < 6; i++) {
+      const x = SKY_BOX.x0 + rand() * (SKY_BOX.x1 - SKY_BOX.x0);
+      const y = SKY_BOX.y0 + rand() * (SKY_BOX.y1 - SKY_BOX.y0);
+      let d = Infinity;
+      for (const s of older) d = Math.min(d, Math.hypot((x - s.x) * 1.4, y - s.y));
+      if (d > bestD) {
+        bestD = d;
+        best = { x, y };
+      }
+    }
+    const p = t.parent ? periodTasks.find(x => x.id === t.parent) : null;
+    const star = {
+      key,
+      raw: t.raw,
+      q,
+      day: t.day,
+      x: r2(best.x),
+      y: r2(best.y),
+      level: p ? p.level : 0,
+      parent: p ? p.id : '',
+      name: p ? p.text : '',
+      today: t.day === viewDay,
+      age: viewDay - t.day,
+    };
+    placed[q].push(star);
+    stars.push(star);
+  }
+  const groups = new Map();
+  for (const s of stars) {
+    if (!s.parent) continue;
+    const k = `${s.q}|${s.parent}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(s);
+  }
+  const lines = [...groups.values()]
+    .filter(g => g.length >= 2)
+    .map(g => ({ q: g[0].q, parent: g[0].parent, pts: g.map(s => [s.x, s.y]) }));
+  return { stars, lines };
+}
+
+// 背景里的微尘星，只是装饰
+function dustLayout(seed, n) {
+  const rand = rng(seed);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      x: Math.round(rand() * 1000) / 10,
+      y: Math.round(rand() * 1000) / 10,
+      o: Math.round((0.15 + rand() * 0.4) * 100) / 100,
+      d: Math.round(rand() * 60) / 10,
+      big: rand() < 0.2,
+    });
+  }
   return out;
 }
 
@@ -1081,6 +1182,7 @@ class MatrixView extends ItemView {
     }
     this.registerEvent(this.app.workspace.on('css-change', () => this.requestRefresh()));
     this.registerInterval(window.setInterval(() => this.requestRefresh(), 5 * 60 * 1000));
+    this.registerInterval(window.setInterval(() => this.meteor(), 9000));
     this.registerDomEvent(document, 'keydown', e => {
       if (this.app.workspace.getActiveViewOfType(MatrixView) !== this) return;
       if (e.target.closest && e.target.closest('input, textarea, select, .modal')) return;
@@ -1172,6 +1274,7 @@ class MatrixView extends ItemView {
         lastPeriod = this.periodTasks.length >= 1 && this.periodTasks.every(x => x === t || x.done);
       }
       this.pop = { raw: formatTask(Object.assign({}, t, { done: true })), until: Date.now() + 2000 };
+      if (scope.kind === 'day' && el) this.pop.from = el.getBoundingClientRect();
       if (fx && el) {
         el.addClass('is-on');
         el.addClass('is-pop');
@@ -1439,6 +1542,7 @@ class MatrixView extends ItemView {
     this.buildTray(el);
     if (!this.settings.hideTips) this.buildTips(el);
     el.scrollTop = scroll;
+    this.flyPop();
     if (this.popHit) {
       this.pop = null;
       this.popHit = false;
@@ -1835,6 +1939,13 @@ class MatrixView extends ItemView {
     for (const c of '不重要') lo.createSpan({ text: c });
     const board = wrap.createDiv('pm-board');
     this.board = board;
+    this.skyLayers = {};
+    this.skyStars = new Map();
+    this.sky = null;
+    if (this.settings.sky) {
+      board.addClass('has-sky');
+      this.sky = skyLayout(this.allDaily, this.periodTasks, this.day.date());
+    }
     wrap.createDiv();
     const xax = wrap.createDiv('pm-xaxis');
     xax.createSpan({ text: '不紧急' });
@@ -1843,6 +1954,7 @@ class MatrixView extends ItemView {
 
     for (const q of [2, 1, 3, 4]) {
       const qd = board.createDiv({ cls: 'pm-quad', attr: { 'data-q': q } });
+      if (this.sky) this.buildSky(qd, q);
       const all = quadList(this.dayTasks, q);
       const shown = this.visibleIn(q);
       const n = all.filter(t => !t.done).length;
@@ -1872,6 +1984,116 @@ class MatrixView extends ItemView {
         empty.createSpan({ cls: 'pm-qempty-drop', text: '松开放到这里' });
       }
     }
+  }
+
+  // ----- 星空 -----
+
+  buildSky(qd, q) {
+    const sky = qd.createDiv('pm-sky');
+    this.skyLayers[q] = sky;
+    if (q === 2 || q === 4) sky.createDiv('pm-sky-band');
+    if (q === 3) sky.createDiv('pm-sky-moon');
+    if (q === 2) sky.createDiv('pm-sky-venus');
+    if (q === 1 || q === 2) {
+      for (let i = 0; i < 2; i++) sky.createDiv('pm-sky-cloud').style.setProperty('--i', String(i));
+    }
+    const dust = sky.createDiv('pm-sky-dust');
+    for (const d of dustLayout(hashStr(`${this.file.path}|${q}`), 28)) {
+      const s = dust.createSpan(d.big ? 'is-big' : '');
+      s.style.left = d.x + '%';
+      s.style.top = d.y + '%';
+      s.style.setProperty('--o', String(d.o));
+      s.style.setProperty('--d', d.d + 's');
+    }
+
+    const lines = this.sky.lines.filter(l => l.q === q);
+    if (lines.length) {
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', 'pm-sky-lines');
+      svg.setAttribute('viewBox', '0 0 100 100');
+      svg.setAttribute('preserveAspectRatio', 'none');
+      for (const l of lines) {
+        const pl = document.createElementNS(NS, 'polyline');
+        pl.setAttribute('points', l.pts.map(p => p.join(',')).join(' '));
+        pl.setAttribute('vector-effect', 'non-scaling-stroke');
+        pl.dataset.parent = l.parent;
+        svg.appendChild(pl);
+      }
+      sky.appendChild(svg);
+    }
+
+    for (const s of this.sky.stars) {
+      if (s.q !== q) continue;
+      const el = sky.createDiv({ cls: 'pm-star' + (s.today ? ' is-today' : '') });
+      el.dataset.level = String(s.level);
+      if (s.parent) el.dataset.parent = s.parent;
+      el.style.left = s.x + '%';
+      el.style.top = s.y + '%';
+      el.style.setProperty('--o', String(s.today ? 1 : Math.max(0.35, 0.85 - s.age * 0.06)));
+      el.style.setProperty('--tw', ((hashStr(s.key) % 30) / 10) + 's');
+      if (s.level === 3) el.createSpan('pm-star-spark');
+      if (s.name) el.createSpan({ cls: 'pm-star-name' + (s.x > 60 ? ' is-right' : ''), text: s.name });
+      if (this.pop && this.pop.raw === s.raw && Date.now() <= this.pop.until && this.fxOn()) {
+        el.addClass('is-born');
+        if (!this.pop.from) el.addClass('is-quick');
+        this.popHit = true;
+      }
+      if (!this.skyStars.has(s.raw)) this.skyStars.set(s.raw, el);
+    }
+  }
+
+  // 鼠标移到某一行：点亮它的星星和所属主线的星座
+  skyHot(t, on) {
+    if (!this.sky || t.x == null) return;
+    const sky = this.skyLayers[quadOf(t)];
+    if (!sky) return;
+    const star = t.done ? this.skyStars.get(t.raw) : null;
+    if (star) star.toggleClass('is-hot', on);
+    sky.toggleClass('is-focus', on && !!(star || t.parent));
+    if (!t.parent) return;
+    const kin = sky.querySelectorAll(`[data-parent="${t.parent}"]`);
+    for (const el of kin) el.toggleClass('is-kin', on);
+    const first = [...kin].find(el => el.hasClass('pm-star'));
+    if (!star && first) first.toggleClass('is-label', on);
+  }
+
+  // 刚完成的任务：一颗流星从勾选圈飞到它的星星
+  flyPop() {
+    const pop = this.pop;
+    if (!pop || !pop.from || pop.flown || !this.fxOn()) return;
+    const star = this.skyStars.get(pop.raw);
+    if (!star) return;
+    pop.flown = true;
+    const a = pop.from;
+    const b = star.getBoundingClientRect();
+    const x0 = a.left + a.width / 2;
+    const y0 = a.top + a.height / 2;
+    const dx = b.left + b.width / 2 - x0;
+    const dy = b.top + b.height / 2 - y0;
+    if (Math.hypot(dx, dy) < 8) return;
+    const fly = this.fxLayer().createDiv('pm-fly');
+    fly.style.left = x0 + 'px';
+    fly.style.top = y0 + 'px';
+    fly.style.setProperty('--dx', dx.toFixed(1) + 'px');
+    fly.style.setProperty('--dy', dy.toFixed(1) + 'px');
+    fly.style.color = getComputedStyle(star).color;
+    const tail = fly.createDiv('pm-fly-tail');
+    tail.style.transform = `rotate(${(Math.atan2(dy, dx) * 180 / Math.PI + 180).toFixed(1)}deg)`;
+    fly.addEventListener('animationend', () => fly.remove());
+  }
+
+  meteor() {
+    if (!this.settings.sky || !this.fxOn() || document.hidden) return;
+    if (!this.contentEl.hasClass('pm-dark') || !this.board || !this.board.isConnected) return;
+    if (Math.random() < 0.45) return;
+    const skies = Object.values(this.skyLayers || {}).filter(s => s.isConnected);
+    if (!skies.length) return;
+    const sky = skies[Math.floor(Math.random() * skies.length)];
+    const m = sky.createDiv('pm-meteor');
+    m.style.left = (45 + Math.random() * 50) + '%';
+    m.style.top = (Math.random() * 45) + '%';
+    m.addEventListener('animationend', () => m.remove());
   }
 
   buildTimeline(parent, today) {
@@ -1955,6 +2177,10 @@ class MatrixView extends ItemView {
 
     const chk = buildCheck(card, t.done, (v, el) => this.setDone(scope, t, v, el));
     if (this.popMatch(t)) this.replayPop(chk, card);
+    if (inQuad && this.sky) {
+      card.addEventListener('pointerenter', () => this.skyHot(t, true));
+      card.addEventListener('pointerleave', () => this.skyHot(t, false));
+    }
 
     const body = card.createDiv('pm-card-body');
     const txt = body.createDiv('pm-text');
@@ -2581,6 +2807,13 @@ class MatrixSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       }));
     new Setting(containerEl)
+      .setName('星空背景')
+      .setDesc('四个象限的背景变成天空：每完成一个任务，就在它所在的象限点亮一颗星。同一主线下的星星连成星座。深色是夜空，浅色是黄昏。')
+      .addToggle(tg => tg.setValue(!!s.sky).onChange(async v => {
+        s.sky = v;
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl)
       .setName('每日习惯')
       .setDesc(s.habits.join('、') || '还没有设置')
       .addButton(b => b.setButtonText('编辑').onClick(() => {
@@ -2624,6 +2857,10 @@ module.exports._test = {
   heatOf,
   longestStreak,
   periodStats,
+  hashStr,
+  rng,
+  skyLayout,
+  dustLayout,
   parsePeriod,
   defaultEnd,
   splitLines,
