@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS = {
   size: 'm',
   hideTips: false,
   carry: null,
+  fx: true,
 };
 
 // x/y 仍写进 %%m:x,y%%：x、y 决定象限，y 同时决定象限内的排序
@@ -363,6 +364,50 @@ function reorderPatches(tasks, task, q, index) {
   return out;
 }
 
+// 「马上做」的火势：0 熄灭，1–3 越来越旺
+function heatOf(tasks, periodTasks) {
+  const open = quadList(tasks, 1).filter(t => !t.done);
+  if (!open.length) return { level: 0, n: 0, soon: false };
+  const soon = open.some(t => {
+    const p = t.parent ? periodTasks.find(x => x.id === t.parent) : null;
+    const due = t.due || (p && p.due);
+    return !!due && daysUntil(due) <= 1;
+  });
+  return { level: clamp(Math.ceil(open.length / 2) + (soon ? 1 : 0), 1, 3), n: open.length, soon };
+}
+
+function longestStreak(doneByDay, name, from, to) {
+  let best = 0;
+  let run = 0;
+  for (let d = from; d <= to; d++) {
+    run = (doneByDay.get(d) || new Set()).has(name) ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  return best;
+}
+
+function periodStats(o) {
+  const { periodTasks, allDaily, habitByDay, habits, start, end, day } = o;
+  const to = Math.min(day, end);
+  let checkins = 0;
+  for (const [d, set] of habitByDay) if (d >= start && d <= to) checkins += set.size;
+  let best = { name: '', n: 0 };
+  for (const h of habits) {
+    const n = longestStreak(habitByDay, h, start, to);
+    if (n > best.n) best = { name: h, n };
+  }
+  return {
+    periodDone: periodTasks.filter(t => t.done).length,
+    periodTotal: periodTasks.length,
+    dailyDone: allDaily.filter(t => t.done).length,
+    dailyTotal: allDaily.length,
+    checkins,
+    best,
+    nth: clamp(day - start + 1, 1, end - start + 1),
+    total: end - start + 1,
+  };
+}
+
 function habitStreak(doneByDay, name, day, firstDay) {
   let d = day;
   if (!(doneByDay.get(d) || new Set()).has(name)) d -= 1;
@@ -444,6 +489,7 @@ function applySkin(el, plugin) {
   el.classList.remove('pm-dark', 'pm-light');
   el.classList.add(dark ? 'pm-dark' : 'pm-light');
   el.style.fontSize = (SIZES[plugin.settings.size] || SIZES.m) + 'px';
+  el.classList.toggle('pm-fx', !!plugin.settings.fx);
 }
 
 function iconBtn(parent, icon, label, cls) {
@@ -464,7 +510,7 @@ function buildCheck(parent, done, onToggle) {
   setIcon(c, 'check');
   c.addEventListener('click', e => {
     e.stopPropagation();
-    onToggle(!done);
+    onToggle(!done, c);
   });
   return c;
 }
@@ -998,6 +1044,14 @@ class MatrixView extends ItemView {
     this.timer = null;
     this.toastEl = null;
     this.toastTimer = null;
+    this.fxEl = null;
+    this.pop = null;
+    this.popHit = false;
+    this.stats = null;
+    this.heatKey = '';
+    this.heatLevel = 0;
+    this.smokeUntil = 0;
+    this.smokeFresh = false;
   }
 
   getViewType() {
@@ -1042,6 +1096,7 @@ class MatrixView extends ItemView {
     window.clearTimeout(this.timer);
     window.clearTimeout(this.toastTimer);
     if (this.toastEl) this.toastEl.remove();
+    if (this.fxEl) this.fxEl.remove();
   }
 
   requestRefresh() {
@@ -1106,8 +1161,189 @@ class MatrixView extends ItemView {
     if (await this.plugin.updateTask(this.file, scope, t, null)) this.toast(`已删除「${label || t.text}」`);
   }
 
-  async setDone(scope, t, v) {
-    if (await this.plugin.updateTask(this.file, scope, t, { done: v }) && v) this.toast(`已完成「${t.text}」`);
+  async setDone(scope, t, v, el) {
+    const fx = this.fxOn();
+    let allDay = false;
+    let lastPeriod = false;
+    if (v) {
+      if (scope.kind === 'day') {
+        allDay = this.dayTasks.length >= 2 && this.dayTasks.every(x => x === t || x.done);
+      } else {
+        lastPeriod = this.periodTasks.length >= 1 && this.periodTasks.every(x => x === t || x.done);
+      }
+      this.pop = { raw: formatTask(Object.assign({}, t, { done: true })), until: Date.now() + 2000 };
+      if (fx && el) {
+        el.addClass('is-on');
+        el.addClass('is-pop');
+        this.burst(el);
+      }
+    }
+    if (!v) {
+      await this.plugin.updateTask(this.file, scope, t, { done: v });
+      return;
+    }
+    if (lastPeriod) this.stats = { played: !fx };
+    if (!await this.plugin.updateTask(this.file, scope, t, { done: v })) {
+      this.stats = null;
+      return;
+    }
+    if (lastPeriod) {
+      if (fx) this.confetti(true);
+      this.toast('本期周期任务全部完成！');
+    } else if (allDay) {
+      if (fx) this.confetti(false);
+      this.toast('今天的任务全部完成 🎉');
+    } else {
+      this.toast(`已完成「${t.text}」`);
+    }
+  }
+
+  // ----- 趣味动画 -----
+
+  fxOn() {
+    return !!this.settings.fx && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  fxLayer() {
+    if (!this.fxEl || !this.fxEl.isConnected) this.fxEl = document.body.createDiv('pm-fx-layer');
+    return this.fxEl;
+  }
+
+  burst(el) {
+    const r = el.getBoundingClientRect();
+    const color = getComputedStyle(el).getPropertyValue('--pm-check').trim() || '#34c759';
+    const layer = this.fxLayer();
+    const n = 10;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.5;
+      const d = r.width * (0.9 + Math.random() * 0.8);
+      const p = layer.createDiv('pm-spark');
+      p.style.left = (r.left + r.width / 2) + 'px';
+      p.style.top = (r.top + r.height / 2) + 'px';
+      p.style.background = color;
+      p.style.setProperty('--dx', (Math.cos(a) * d).toFixed(1) + 'px');
+      p.style.setProperty('--dy', (Math.sin(a) * d).toFixed(1) + 'px');
+      p.addEventListener('animationend', () => p.remove());
+    }
+  }
+
+  confetti(big) {
+    const r = this.contentEl.getBoundingClientRect();
+    const box = this.fxLayer().createDiv('pm-confetti-box');
+    box.style.left = r.left + 'px';
+    box.style.top = r.top + 'px';
+    box.style.width = r.width + 'px';
+    box.style.height = r.height + 'px';
+    const colors = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#5ac8fa', '#007aff', '#af52de', '#ff2d55'];
+    const n = big ? 120 : 70;
+    for (let i = 0; i < n; i++) {
+      const c = box.createDiv('pm-confetti');
+      c.style.left = (Math.random() * 100) + '%';
+      c.style.width = (5 + Math.random() * 5) + 'px';
+      c.style.height = (8 + Math.random() * 7) + 'px';
+      c.style.background = colors[i % colors.length];
+      if (Math.random() < 0.3) c.style.borderRadius = '999px';
+      c.style.setProperty('--dx', ((Math.random() - 0.5) * 220).toFixed(0) + 'px');
+      c.style.setProperty('--dy', (r.height * (0.55 + Math.random() * 0.5)).toFixed(0) + 'px');
+      c.style.setProperty('--rot', ((Math.random() - 0.5) * 1080).toFixed(0) + 'deg');
+      c.style.animationDuration = (1.8 + Math.random() * 1.4).toFixed(2) + 's';
+      c.style.animationDelay = (Math.random() * (big ? 0.6 : 0.3)).toFixed(2) + 's';
+    }
+    window.setTimeout(() => box.remove(), 4000);
+  }
+
+  popMatch(t) {
+    if (!this.pop || this.pop.raw !== t.raw || Date.now() > this.pop.until || !this.fxOn()) return false;
+    this.popHit = true;
+    return true;
+  }
+
+  replayPop(chk, card) {
+    chk.addClass('is-settle');
+    card.addClass('is-justdone');
+  }
+
+  // 显示用的「今天」在本期里是第几日（本期没开始取开始日，已结束取结束日）
+  statDay() {
+    const p = this.period;
+    const today = moment().startOf('day');
+    if (today.isBefore(p.startDate, 'day')) return p.start;
+    if (today.isAfter(p.endDate, 'day')) return p.endDate.date();
+    return today.date();
+  }
+
+  buildStatsCard(grid) {
+    const p = this.period;
+    const s = periodStats({
+      periodTasks: this.periodTasks,
+      allDaily: this.allDaily,
+      habitByDay: this.habitByDay,
+      habits: this.settings.habits,
+      start: p.start,
+      end: p.endDate.date(),
+      day: this.statDay(),
+    });
+    const card = grid.createDiv('pm-pcard pm-stats');
+    if (this.stats && !this.stats.played) {
+      card.addClass('is-flip');
+      this.stats.played = true;
+    }
+    const head = card.createDiv('pm-stats-head');
+    setIcon(head.createSpan('pm-stats-icon'), 'trophy');
+    const ht = head.createDiv();
+    ht.createDiv({ cls: 'pm-stats-title', text: '本期主线全部完成' });
+    const left = s.total - s.nth;
+    ht.createDiv({
+      cls: 'pm-stats-sub',
+      text: left > 0 ? `第 ${s.nth} 天完成 · 提前 ${left} 天` : `共 ${s.total} 天`,
+    });
+    const g = card.createDiv('pm-stats-grid');
+    const cell = (num, label) => {
+      const c = g.createDiv('pm-stats-cell');
+      c.createDiv({ cls: 'pm-stats-num', text: num });
+      c.createDiv({ cls: 'pm-stats-label', text: label });
+    };
+    cell(String(s.periodDone), '条主线');
+    cell(`${s.dailyDone}/${s.dailyTotal}`, '每日任务');
+    cell(String(s.checkins), '次习惯打卡');
+    cell(s.best.n ? `${s.best.n} 天` : '—', s.best.n ? `最长连续 · ${s.best.name}` : '最长连续');
+  }
+
+  // 「马上做」的火苗：图标随火势变化，清空时冒烟
+  buildFlame(head, qd) {
+    const icon = head.createSpan('pm-qicon pm-flame');
+    setIcon(icon, QUADS[1].icon);
+    const heat = heatOf(this.dayTasks, this.periodTasks);
+    const key = `${this.file.path}#${this.day.date()}`;
+    if (key === this.heatKey && this.heatLevel > 0 && heat.level === 0 && this.fxOn()) {
+      this.smokeUntil = Date.now() + 4000;
+      this.smokeFresh = true;
+    }
+    if (key !== this.heatKey) this.smokeUntil = 0;
+    this.heatKey = key;
+    this.heatLevel = heat.level;
+
+    qd.dataset.heat = String(heat.level);
+    icon.dataset.heat = String(heat.level);
+    icon.title = heat.level
+      ? `还有 ${heat.n} 项要马上做` + (heat.soon ? '，有任务今明两天截止' : '')
+      : '火已经灭了';
+    for (let i = 0; i < Math.max(0, heat.level - 1) * 2; i++) {
+      const e = icon.createSpan('pm-ember');
+      e.style.setProperty('--i', String(i));
+    }
+    const out = heat.level === 0 && Date.now() < this.smokeUntil;
+    if (out) {
+      icon.addClass('is-out');
+      if (this.smokeFresh) {
+        this.smokeFresh = false;
+        for (let i = 0; i < 3; i++) {
+          const s = icon.createSpan('pm-smoke');
+          s.style.setProperty('--i', String(i));
+        }
+      }
+    }
+    return out;
   }
 
   // ----- 渲染 -----
@@ -1203,6 +1439,10 @@ class MatrixView extends ItemView {
     this.buildTray(el);
     if (!this.settings.hideTips) this.buildTips(el);
     el.scrollTop = scroll;
+    if (this.popHit) {
+      this.pop = null;
+      this.popHit = false;
+    }
   }
 
   // ----- 顶部 -----
@@ -1341,6 +1581,8 @@ class MatrixView extends ItemView {
     textBtn(head, '新建', 'is-ghost', 'plus').onclick = () => this.newPeriodTask();
 
     const grid = sec.createDiv('pm-pgrid');
+    if (this.periodTasks.length && this.periodTasks.every(t => t.done)) this.buildStatsCard(grid);
+    else this.stats = null;
     const tasks = this.periodTasks
       .filter(t => !(this.settings.hideDone && t.done))
       .sort((a, b) =>
@@ -1348,7 +1590,7 @@ class MatrixView extends ItemView {
         || (b.level - a.level)
         || ((a.due || '9999') < (b.due || '9999') ? -1 : (a.due || '9999') > (b.due || '9999') ? 1 : 0));
     for (const t of tasks) grid.appendChild(this.makePeriodCard(t));
-    if (!tasks.length) {
+    if (!tasks.length && !this.periodTasks.length) {
       const add = grid.createDiv('pm-pcard is-add');
       add.createSpan({ text: '＋ 添加这一期要推进的主线' });
       add.onclick = () => this.newPeriodTask();
@@ -1373,7 +1615,8 @@ class MatrixView extends ItemView {
     const upd = patch => this.plugin.updateTask(this.file, scope, t, patch);
 
     const head = card.createDiv('pm-pcard-head');
-    buildCheck(head, t.done, v => this.setDone(scope, t, v));
+    const chk = buildCheck(head, t.done, (v, el) => this.setDone(scope, t, v, el));
+    if (this.popMatch(t)) this.replayPop(chk, card);
     buildStars(head, t.level, v => upd({ level: v }));
     head.createDiv('pm-spacer');
     if (t.due && !t.done) {
@@ -1604,10 +1847,19 @@ class MatrixView extends ItemView {
       const shown = this.visibleIn(q);
       const n = all.filter(t => !t.done).length;
       const head = qd.createDiv('pm-qhead');
-      setIcon(head.createSpan('pm-qicon'), QUADS[q].icon);
+      const out = q === 1 ? this.buildFlame(head, qd) : false;
+      if (q !== 1) {
+        const icon = head.createSpan('pm-qicon');
+        setIcon(icon, QUADS[q].icon);
+        if (q === 3 && !n) {
+          icon.addClass('pm-steam');
+          for (let i = 0; i < 3; i++) icon.createSpan('pm-steam-wisp').style.setProperty('--i', String(i));
+        }
+      }
       const lab = head.createDiv('pm-qlabel');
       lab.createDiv({ cls: 'pm-qname', text: QUADS[q].title });
-      lab.createDiv({ cls: 'pm-qhint', text: QUADS[q].sub });
+      if (out) lab.createDiv({ cls: 'pm-qhint is-out', text: '火已扑灭 · 马上做清空了' });
+      else lab.createDiv({ cls: 'pm-qhint', text: QUADS[q].sub });
       const add = iconBtn(head, 'plus', `添加到「${QUADS[q].title}」`, 'pm-qadd');
       add.onclick = () => this.selectQuad && this.selectQuad(q);
       head.createSpan({ cls: 'pm-qcount' + (n ? '' : ' is-zero'), text: String(n) });
@@ -1701,7 +1953,8 @@ class MatrixView extends ItemView {
     if (t.done) card.addClass('is-done');
     if (t.x != null) card.dataset.q = String(quadOf(t));
 
-    buildCheck(card, t.done, v => this.setDone(scope, t, v));
+    const chk = buildCheck(card, t.done, (v, el) => this.setDone(scope, t, v, el));
+    if (this.popMatch(t)) this.replayPop(chk, card);
 
     const body = card.createDiv('pm-card-body');
     const txt = body.createDiv('pm-text');
@@ -2321,6 +2574,13 @@ class MatrixSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     new Setting(containerEl)
+      .setName('趣味动画')
+      .setDesc('完成时的弹跳、粒子和彩带，「马上做」的火苗。系统开启「减弱动态效果」时会自动关闭。')
+      .addToggle(tg => tg.setValue(!!s.fx).onChange(async v => {
+        s.fx = v;
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl)
       .setName('每日习惯')
       .setDesc(s.habits.join('、') || '还没有设置')
       .addButton(b => b.setButtonText('编辑').onClick(() => {
@@ -2361,6 +2621,9 @@ module.exports._test = {
   endPos,
   reorderPatches,
   habitStreak,
+  heatOf,
+  longestStreak,
+  periodStats,
   parsePeriod,
   defaultEnd,
   splitLines,

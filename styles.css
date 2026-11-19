@@ -1969,3 +1969,290 @@
   .pm-skin .pm-timeline { width: auto; }
   .pm-skin .pm-matrix { min-height: 30em; }
 }
+
+/* ---------- 趣味动画（设置里的「趣味动画」开关 → .pm-fx） ---------- */
+
+/* 完成：勾选圈弹一下 */
+.pm-skin.pm-fx .pm-check.is-pop { animation: pm-pop 0.42s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.pm-skin.pm-fx .pm-check.is-settle svg { animation: pm-tick 0.3s ease-out; }
+.pm-skin.pm-fx .pm-card.is-justdone,
+.pm-skin.pm-fx .pm-pcard.is-justdone { animation: pm-fade-done 0.5s var(--pm-ease); }
+
+@keyframes pm-pop {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.35); }
+  70% { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
+
+@keyframes pm-tick {
+  from { transform: scale(0.4); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes pm-fade-done {
+  from { opacity: 1; }
+}
+
+/* 粒子和彩带放在 body 上的独立图层，不受视图重绘影响 */
+.pm-fx-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.pm-fx-layer .pm-spark {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 999px;
+  animation: pm-spark 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+
+@keyframes pm-spark {
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(var(--dx), var(--dy)) scale(0.2); opacity: 0; }
+}
+
+.pm-fx-layer .pm-confetti-box {
+  position: absolute;
+  overflow: hidden;
+}
+
+.pm-fx-layer .pm-confetti {
+  position: absolute;
+  top: -16px;
+  border-radius: 2px;
+  opacity: 0;
+  animation-name: pm-confetti;
+  animation-timing-function: cubic-bezier(0.25, 0.6, 0.45, 1);
+  animation-fill-mode: forwards;
+}
+
+@keyframes pm-confetti {
+  0% { transform: translate(0, 0) rotate(0); opacity: 1; }
+  85% { opacity: 1; }
+  100% { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}
+
+/* 本期战绩卡 */
+.pm-skin .pm-pcard.pm-stats {
+  grid-column: 1 / -1;
+  min-height: 0;
+  gap: 0.9em;
+  cursor: default;
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--pm-star) 22%, transparent), transparent 60%),
+    radial-gradient(100% 120% at 100% 100%, color-mix(in srgb, var(--pm-green) 16%, transparent), transparent 60%),
+    var(--pm-surface);
+  box-shadow: var(--pm-shadow), inset 0 0 0 1px color-mix(in srgb, var(--pm-star) 30%, transparent);
+}
+
+.pm-skin .pm-pcard.pm-stats:hover { transform: none; }
+
+.pm-skin.pm-fx .pm-pcard.pm-stats.is-flip {
+  animation: pm-flip 0.9s cubic-bezier(0.3, 1.3, 0.5, 1) both;
+  transform-origin: center;
+  backface-visibility: hidden;
+}
+
+@keyframes pm-flip {
+  0% { transform: perspective(900px) rotateY(-100deg) scale(0.9); opacity: 0; }
+  60% { opacity: 1; }
+  100% { transform: perspective(900px) rotateY(0) scale(1); opacity: 1; }
+}
+
+.pm-skin .pm-stats-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8em;
+}
+
+.pm-skin .pm-stats-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.4em;
+  height: 2.4em;
+  border-radius: 0.75em;
+  background: linear-gradient(135deg, #ffd60a, var(--pm-star));
+  color: #fff;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--pm-star) 45%, transparent);
+}
+
+.pm-skin .pm-stats-icon svg { width: 1.3em; height: 1.3em; stroke-width: 2.2; }
+
+.pm-skin .pm-stats-title {
+  font-family: var(--pm-display);
+  font-size: 1.15em;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--pm-text);
+}
+
+.pm-skin .pm-stats-sub {
+  font-size: 0.8em;
+  color: var(--pm-text-2);
+}
+
+.pm-skin .pm-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6em;
+}
+
+.pm-skin .pm-stats-cell {
+  padding: 0.6em 0.8em;
+  border-radius: var(--pm-radius);
+  background: var(--pm-sunken-2);
+}
+
+.pm-skin .pm-stats-num {
+  font-family: var(--pm-display);
+  font-size: 1.45em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--pm-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.pm-skin .pm-stats-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.74em;
+  font-weight: 500;
+  color: var(--pm-text-3);
+}
+
+/* 「马上做」火苗 */
+.pm-skin .pm-qicon.pm-flame { position: relative; overflow: visible; }
+.pm-skin .pm-qicon.pm-flame svg { transform-origin: 50% 90%; }
+
+.pm-skin .pm-qicon.pm-flame[data-heat="0"] {
+  background: var(--pm-sunken);
+  color: var(--pm-text-3);
+  box-shadow: none;
+}
+
+.pm-skin .pm-qicon.pm-flame[data-heat="2"] {
+  background: linear-gradient(160deg, #ff9f0a, var(--pm-q1));
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--pm-q1) 50%, transparent);
+}
+
+.pm-skin .pm-qicon.pm-flame[data-heat="3"] {
+  background: linear-gradient(160deg, #ffd60a, #ff9f0a 35%, var(--pm-q1));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pm-q1) 18%, transparent), 0 3px 16px color-mix(in srgb, var(--pm-q1) 65%, transparent);
+}
+
+.pm-skin.pm-fx .pm-qicon.pm-flame[data-heat="1"] svg { animation: pm-flicker 2.4s ease-in-out infinite; }
+.pm-skin.pm-fx .pm-qicon.pm-flame[data-heat="2"] svg { animation: pm-flicker 1.4s ease-in-out infinite; }
+.pm-skin.pm-fx .pm-qicon.pm-flame[data-heat="3"] svg { animation: pm-flicker 0.8s ease-in-out infinite; }
+.pm-skin.pm-fx .pm-qicon.pm-flame[data-heat="3"] { animation: pm-glow 1.6s ease-in-out infinite; }
+
+@keyframes pm-flicker {
+  0%, 100% { transform: scale(1, 1) rotate(0); }
+  25% { transform: scale(0.94, 1.08) rotate(-4deg); }
+  50% { transform: scale(1.04, 0.95) rotate(2deg); }
+  75% { transform: scale(0.97, 1.05) rotate(4deg); }
+}
+
+@keyframes pm-glow {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.15); }
+}
+
+.pm-skin .pm-ember { display: none; }
+
+.pm-skin.pm-fx .pm-ember {
+  display: block;
+  position: absolute;
+  left: calc(30% + var(--i) * 10%);
+  bottom: 60%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: #ffd60a;
+  box-shadow: 0 0 4px #ff9f0a;
+  opacity: 0;
+  animation: pm-ember 1.6s ease-out infinite;
+  animation-delay: calc(var(--i) * 0.4s);
+}
+
+@keyframes pm-ember {
+  0% { transform: translate(0, 0); opacity: 0; }
+  15% { opacity: 1; }
+  100% { transform: translate(calc((var(--i) - 1.5) * 4px), -1.6em); opacity: 0; }
+}
+
+/* 「马上做」有火时，象限顶部透出一点暖光 */
+.pm-skin.pm-fx .pm-quad[data-q="1"][data-heat="3"] {
+  background:
+    radial-gradient(80% 5em at 1.5em 0, color-mix(in srgb, #ff9f0a 16%, transparent), transparent),
+    linear-gradient(180deg, color-mix(in srgb, var(--pm-qc) calc(var(--pm-tint) + 5%), transparent), color-mix(in srgb, var(--pm-qc) 2%, transparent) 5em),
+    var(--pm-surface);
+}
+
+/* 熄灭：冒烟 */
+.pm-skin .pm-qicon.pm-flame.is-out svg { opacity: 0.55; }
+
+.pm-skin .pm-smoke {
+  position: absolute;
+  left: 50%;
+  bottom: 70%;
+  width: 0.7em;
+  height: 0.7em;
+  margin-left: -0.35em;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pm-text-3) 70%, transparent);
+  filter: blur(2px);
+  opacity: 0;
+  animation: pm-smoke 2.4s ease-out forwards;
+  animation-delay: calc(var(--i) * 0.35s);
+}
+
+@keyframes pm-smoke {
+  0% { transform: translate(0, 0) scale(0.5); opacity: 0; }
+  20% { opacity: 0.8; }
+  100% { transform: translate(calc((var(--i) - 1) * 0.6em + 0.3em), -2.6em) scale(2.2); opacity: 0; }
+}
+
+.pm-skin .pm-qhint.is-out { color: var(--pm-green); }
+
+/* 「少做或不做」清空：咖啡冒热气 */
+.pm-skin .pm-qicon.pm-steam { position: relative; overflow: visible; }
+.pm-skin .pm-steam-wisp { display: none; }
+
+.pm-skin.pm-fx .pm-steam-wisp {
+  display: block;
+  position: absolute;
+  left: calc(32% + var(--i) * 14%);
+  bottom: 85%;
+  width: 2px;
+  height: 0.6em;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pm-text-3) 60%, transparent);
+  opacity: 0;
+  animation: pm-steam 2.6s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 0.7s);
+}
+
+@keyframes pm-steam {
+  0% { transform: translateY(0) scaleY(0.6); opacity: 0; }
+  30% { opacity: 0.7; }
+  100% { transform: translate(2px, -0.9em) scaleY(1.2); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-skin .pm-check.is-pop,
+  .pm-skin .pm-check.is-settle svg,
+  .pm-skin .pm-qicon.pm-flame,
+  .pm-skin .pm-qicon.pm-flame svg,
+  .pm-skin .pm-pcard.pm-stats.is-flip { animation: none !important; }
+  .pm-skin .pm-ember,
+  .pm-skin .pm-smoke,
+  .pm-skin .pm-steam-wisp { display: none !important; }
+}

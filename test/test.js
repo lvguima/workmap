@@ -151,4 +151,34 @@ assert.strictEqual(T.habitStreak(hb, 'a', 20, 18), 2); // today not yet done -> 
 assert.strictEqual(T.habitStreak(hb, 'b', 20, 18), 2);
 assert.strictEqual(T.habitStreak(hb, 'a', 21, 18), 0);
 assert.strictEqual(T.habitStreak(hb, 'a', 19, 19), 1);
+// fx: heat
+const today = require('moment')().format('YYYY-MM-DD');
+const ht = [mk(1, 80, 30), mk(2, 70, 10), mk(3, 20, 20), mk(4, 80, 5, true)];
+assert.deepStrictEqual(T.heatOf([], []), { level: 0, n: 0, soon: false });
+assert.strictEqual(T.heatOf(ht, []).level, 1);
+assert.strictEqual(T.heatOf(ht, []).n, 2);
+assert.strictEqual(T.heatOf([...ht, mk(5, 90, 40), mk(6, 90, 41), mk(7, 90, 42)], []).level, 3);
+// due today on parent bumps heat
+const hp = Object.assign(mk(8, 80, 20), { parent: 'pA' });
+const r1 = T.heatOf([hp], [{ id: 'pA', due: today }]);
+assert.strictEqual(r1.soon, true);
+assert.strictEqual(r1.level, 2);
+assert.strictEqual(T.heatOf([hp], [{ id: 'pA', due: '2099-01-01' }]).level, 1);
+// fx: stats
+assert.strictEqual(T.longestStreak(hb, 'a', 18, 21), 2);
+assert.strictEqual(T.longestStreak(hb, 'b', 18, 21), 2);
+assert.strictEqual(T.longestStreak(hb, 'c', 18, 21), 0);
+const st = T.periodStats({
+  periodTasks: [{ done: true }, { done: true }],
+  allDaily: [{ done: true }, { done: false }, { done: true }],
+  habitByDay: hb,
+  habits: ['a', 'b'],
+  start: 18,
+  end: 30,
+  day: 20,
+});
+assert.deepStrictEqual(st, {
+  periodDone: 2, periodTotal: 2, dailyDone: 2, dailyTotal: 3,
+  checkins: 4, best: { name: 'a', n: 2 }, nth: 3, total: 13,
+});
 console.log('ALL PASS');

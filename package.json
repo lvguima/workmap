@@ -1,6 +1,6 @@
 {
   "name": "workmap",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Obsidian 插件：时段笔记 + 四象限 + 日程，和 md 文件双向同步",
   "main": "main.js",
