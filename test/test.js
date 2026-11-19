@@ -219,17 +219,15 @@ const dupL = T.skyLayout([sd(1, 18, 'x', 75, 20, true), sd(2, 18, 'x', 75, 22, t
 assert.notStrictEqual(dupL.stars[0].key, dupL.stars[1].key);
 assert.deepStrictEqual(T.dustLayout(7, 10), T.dustLayout(7, 10));
 assert.strictEqual(T.dustLayout(7, 10).length, 10);
-// river：经过 1、3、4 象限，不进「排时间做」，结果确定
-const qOfPt = p => (p.x < 0.5 ? (p.y < 0.5 ? 2 : 3) : (p.y < 0.5 ? 1 : 4));
-const hits = { 1: 0, 2: 0, 3: 0, 4: 0 };
-for (let i = 0; i <= 200; i++) {
-  const p = T.riverAt(i / 200);
-  if (p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1) hits[qOfPt(p)]++;
-}
-assert.strictEqual(hits[2], 0);
-for (const q of [1, 3, 4]) assert.ok(hits[q] > 30, `river q${q}: ${hits[q]}`);
-const rv = T.riverLayout(99, 260);
-assert.strictEqual(rv.length, 272);
-assert.deepStrictEqual(T.riverLayout(99, 260), rv);
-assert.ok(rv.every(s => !(s.x < 0.47 && s.y < 0.47)));
+// galaxy：曲线在看板内斜穿，布局确定
+const g0 = T.galaxyAt(0); const g1 = T.galaxyAt(1);
+assert.ok(g0.x < 0 && g0.y > 0.9 && g1.x > 1 && g1.y < 0.15);
+// 不穿过四个象限交汇的中心
+for (let i = 0; i <= 200; i++) { const p = T.galaxyAt(i / 200); assert.ok(Math.hypot(p.x - 0.5, p.y - 0.5) > 0.12); }
+for (let i = 0; i <= 20; i++) assert.ok(T.galaxyWidth(i / 20) > 0.4);
+const gl = T.galaxyLayout(99);
+assert.deepStrictEqual(T.galaxyLayout(99), gl);
+assert.notDeepStrictEqual(T.galaxyLayout(98).stars[0], gl.stars[0]);
+assert.strictEqual(gl.bright.length, 16);
+assert.ok(gl.stars.length > 2000);
 console.log('ALL PASS');

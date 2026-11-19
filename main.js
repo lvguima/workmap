@@ -457,71 +457,175 @@ function dustLayout(seed, n) {
     out.push({
       x: Math.round(rand() * 1000) / 10,
       y: Math.round(rand() * 1000) / 10,
-      o: Math.round((0.15 + rand() * 0.4) * 100) / 100,
+      o: Math.round((0.2 + rand() * 0.45) * 100) / 100,
       d: Math.round(rand() * 60) / 10,
-      big: rand() < 0.2,
+      dur: Math.round((2 + rand() * 3.5) * 10) / 10,
+      big: rand() < 0.22,
+      tw: rand() < 0.55,
+      glint: rand() < 0.06,
     });
   }
   return out;
 }
 
-// 横跨「少做或不做 → 尽快处理 → 马上做」的星河。坐标是整个看板的比例（0–1）：
-// 从左边进入「少做或不做」，向下兜过「尽快处理」，再向上穿出「马上做」的顶部，不经过「排时间做」。
-const RIVER = [[-0.05, 0.6], [0.45, 1.0], [0.8, 0.95], [0.86, -0.05]];
-const RIVER_W = 0.026;
+// 银河：从「少做或不做」左下缓缓升起，弧过「尽快处理」，从「马上做」右上角出去。
+// 坐标是整张看板的比例（0–1），避开四个象限交汇的中心。
+const GALAXY = [[-0.06, 0.97], [0.42, 0.6], [0.78, 0.66], [1.06, 0.1]];
 
-function riverAt(t) {
-  const [p0, p1, p2, p3] = RIVER;
+function galaxyAt(t) {
+  const [p0, p1, p2, p3] = GALAXY;
   const u = 1 - t;
   const b = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
   const d = [-3 * u * u, 3 * u * u - 6 * u * t, 6 * u * t - 3 * t * t, 3 * t * t];
   const pick = (w, i) => w[0] * p0[i] + w[1] * p1[i] + w[2] * p2[i] + w[3] * p3[i];
-  const dx = pick(d, 0);
-  const dy = pick(d, 1);
-  const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len;
-  const ny = dx / len;
-  const wob = 0.012 * Math.sin(t * Math.PI * 4.6 + 0.7);
-  return { x: pick(b, 0) + nx * wob, y: pick(b, 1) + ny * wob, nx, ny };
+  return { x: pick(b, 0), y: pick(b, 1), dx: pick(d, 0), dy: pick(d, 1) };
 }
 
-// 星河里的星：越靠河心越密越亮，沿河有几处星团
-function riverLayout(seed, n) {
+// 光带宽度沿途起伏，中段鼓起一点（像银心）
+function galaxyWidth(t) {
+  const bulge = Math.exp(-(((t - 0.5) / 0.17) ** 2));
+  return 0.72 + 0.16 * Math.sin(t * 7.3 + 1.1) + 0.1 * Math.sin(t * 17.9 + 0.4) + 0.5 * bulge;
+}
+
+// 银河的组成：大片薄雾、河心的光团、暗尘带、密集的小星、星团和少数会闪的亮星。
+// 位置用 (t, off) 表示：t 是沿河的位置，off 是偏离河心的距离（以当地河宽为单位）。
+function galaxyLayout(seed) {
   const rand = rng(seed);
   const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
-  const r2 = v => Math.round(v * 100) / 100;
-  const r4 = v => Math.round(v * 10000) / 10000;
-  const knots = [0.2 + rand() * 0.1, 0.48 + rand() * 0.1, 0.78 + rand() * 0.1];
-  const place = (t, off) => {
-    const p = riverAt(t);
-    return { x: r4(p.x + p.nx * off * RIVER_W), y: r4(p.y + p.ny * off * RIVER_W) };
-  };
+  const r3 = v => Math.round(v * 1000) / 1000;
+  const T = () => r3(rand());
+  const haze = [];
+  const glow = [];
+  const lanes = [];
   const stars = [];
-  for (let i = 0; i < n; i++) {
-    const t = clamp(rand() < 0.3 ? knots[i % 3] + gauss() * 0.035 : rand(), 0, 1);
-    const off = clamp(gauss(), -3, 3);
-    const core = Math.exp(-off * off / 2);
+  const bright = [];
+  for (let i = 0; i < 70; i++) {
+    haze.push({ t: T(), off: r3(gauss() * 0.7), r: r3(2.2 + rand() * 1.8), a: r3(0.022 + rand() * 0.028), hue: r3(rand()) });
+  }
+  for (let i = 0; i < 220; i++) {
+    const t = rand();
+    const fade = 0.35 + 0.65 * Math.sin(Math.PI * t) ** 0.6;
+    glow.push({ t: r3(t), off: r3(gauss() * 0.3), r: r3(0.45 + rand() * 1.1), a: r3((0.04 + rand() * 0.07) * fade), hue: r3(rand()) });
+  }
+  for (let k = 0; k < 3; k++) {
+    const t0 = 0.08 + k * 0.3 + rand() * 0.08;
+    const len = 0.12 + rand() * 0.14;
+    const base = (k % 2 ? -1 : 1) * (0.1 + rand() * 0.25);
+    for (let i = 0; i < 36; i++) {
+      const u = i / 35;
+      const env = Math.sin(Math.PI * u);
+      lanes.push({
+        t: r3(t0 + u * len),
+        off: r3(base + 0.22 * Math.sin(u * 5.5 + k * 2) + gauss() * 0.06),
+        r: r3(0.12 + env * (0.18 + rand() * 0.22)),
+        a: r3(0.08 + env * 0.38),
+      });
+    }
+  }
+  const tone = () => {
     const k = rand();
-    stars.push(Object.assign(place(t, off), {
-      r: r2(0.6 + Math.pow(rand(), 3) * 1.2 + core * 0.4),
-      o: r2(Math.min(1, 0.25 + core * 0.55 + rand() * 0.2)),
-      tone: k < 0.7 ? 0 : k < 0.85 ? 1 : k < 0.93 ? 2 : 3,
-      tw: rand() < 0.14 ? Math.round(rand() * 40) / 10 : -1,
-      bright: false,
-    }));
+    return k < 0.62 ? 0 : k < 0.8 ? 1 : k < 0.92 ? 2 : 3;
+  };
+  for (let i = 0; i < 1900; i++) {
+    const wide = rand() < 0.25;
+    const off = gauss() * (wide ? 1.4 : 0.6);
+    const core = Math.exp(-off * off / 1.2);
+    stars.push({
+      t: T(),
+      off: r3(off),
+      r: r3(0.35 + Math.pow(rand(), 4) * 1.1),
+      a: r3(Math.min(1, 0.12 + core * 0.55 + rand() * 0.3)),
+      tone: tone(),
+    });
   }
-  for (let i = 0; i < 12; i++) {
-    const t = 0.04 + rand() * 0.92;
-    const off = clamp(gauss() * 0.6, -2, 2);
-    stars.push(Object.assign(place(t, off), {
-      r: r2(1.8 + rand() * 0.8),
-      o: 1,
-      tone: rand() < 0.6 ? 0 : 1 + Math.floor(rand() * 3),
-      tw: Math.round(rand() * 40) / 10,
-      bright: true,
-    }));
+  for (let k = 0; k < 4; k++) {
+    const t0 = 0.15 + k * 0.22 + rand() * 0.06;
+    const o0 = gauss() * 0.4;
+    for (let i = 0; i < 70; i++) {
+      stars.push({
+        t: r3(t0 + gauss() * 0.018),
+        off: r3(o0 + gauss() * 0.22),
+        r: r3(0.4 + Math.pow(rand(), 3) * 0.9),
+        a: r3(0.45 + rand() * 0.5),
+        tone: rand() < 0.5 ? 0 : 2,
+      });
+    }
   }
-  return stars;
+  for (let i = 0; i < 16; i++) {
+    bright.push({
+      t: r3(0.04 + rand() * 0.92),
+      off: r3(gauss() * 0.8),
+      r: r3(1.6 + rand() * 1.1),
+      tone: rand() < 0.5 ? 0 : 1 + Math.floor(rand() * 3),
+      tw: Math.round(rand() * 50) / 10,
+      dur: Math.round((2.2 + rand() * 2.6) * 10) / 10,
+    });
+  }
+  return { haze, glow, lanes, stars, bright };
+}
+
+const GALAXY_TONES = ['248,248,255', '190,210,255', '255,228,180', '255,190,225'];
+
+// 把整条银河画到一张看板大小的离屏画布上；返回画布和亮星的位置（百分比）
+function renderGalaxy(g, W, H, dpr, dark) {
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(W * dpr));
+  cv.height = Math.max(1, Math.round(H * dpr));
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const base = 0.05 * Math.min(H, W * 0.6);
+  const at = (t, off) => {
+    const p = galaxyAt(t);
+    const tx = p.dx * W;
+    const ty = p.dy * H;
+    const len = Math.hypot(tx, ty) || 1;
+    const s = base * galaxyWidth(t);
+    return { x: p.x * W - (ty / len) * off * s, y: p.y * H + (tx / len) * off * s, s };
+  };
+  const blob = (x, y, r, rgb, a) => {
+    if (r <= 0 || a <= 0) return;
+    const gr = ctx.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(${rgb},${a})`);
+    gr.addColorStop(0.4, `rgba(${rgb},${a * 0.5})`);
+    gr.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.fillStyle = gr;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  };
+  const pal = dark
+    ? { core: '255,236,214', warm: '255,214,232', mid: '186,198,255', edge: '146,128,255', k: 1 }
+    : { core: '255,255,255', warm: '255,214,200', mid: '255,236,228', edge: '232,210,255', k: 4 };
+
+  ctx.globalCompositeOperation = dark ? 'lighter' : 'source-over';
+  for (const b of g.haze) {
+    const p = at(b.t, b.off);
+    blob(p.x, p.y, p.s * b.r, b.hue < 0.5 ? pal.edge : pal.mid, b.a * pal.k);
+  }
+  for (const b of g.glow) {
+    const p = at(b.t, b.off);
+    blob(p.x, p.y, p.s * b.r, b.hue < 0.65 ? pal.core : pal.warm, b.a * pal.k * (dark ? 1 : 0.8));
+  }
+  ctx.globalCompositeOperation = 'destination-out';
+  for (const l of g.lanes) {
+    const p = at(l.t, l.off);
+    blob(p.x, p.y, p.s * l.r, '0,0,0', l.a * (dark ? 1 : 0.5));
+  }
+  ctx.globalCompositeOperation = dark ? 'lighter' : 'source-over';
+  for (const s of g.stars) {
+    const p = at(s.t, s.off);
+    ctx.fillStyle = `rgba(${dark ? GALAXY_TONES[s.tone] : '255,255,255'},${dark ? s.a : Math.min(1, s.a * 1.15)})`;
+    if (s.r < 0.75) {
+      ctx.fillRect(p.x, p.y, s.r * 1.3, s.r * 1.3);
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const bright = g.bright.map(b => {
+    const p = at(b.t, b.off);
+    return { x: (p.x / W) * 100, y: (p.y / H) * 100 };
+  });
+  return { canvas: cv, bright };
 }
 
 // 「马上做」的火势：0 熄灭，1–3 越来越旺
@@ -1206,8 +1310,9 @@ class MatrixView extends ItemView {
     this.toastTimer = null;
     this.fxEl = null;
     this.gradSeq = 0;
-    this.river = null;
+    this.galaxy = null;
     this.riverRO = null;
+    this.riverRaf = 0;
     this.pop = null;
     this.popHit = false;
     this.stats = null;
@@ -1244,7 +1349,7 @@ class MatrixView extends ItemView {
     }
     this.registerEvent(this.app.workspace.on('css-change', () => this.requestRefresh()));
     this.registerInterval(window.setInterval(() => this.requestRefresh(), 5 * 60 * 1000));
-    this.registerInterval(window.setInterval(() => this.meteor(), 9000));
+    this.registerInterval(window.setInterval(() => this.meteor(), 6000));
     this.registerDomEvent(document, 'keydown', e => {
       if (this.app.workspace.getActiveViewOfType(MatrixView) !== this) return;
       if (e.target.closest && e.target.closest('input, textarea, select, .modal')) return;
@@ -1261,6 +1366,7 @@ class MatrixView extends ItemView {
     window.clearTimeout(this.toastTimer);
     if (this.toastEl) this.toastEl.remove();
     if (this.fxEl) this.fxEl.remove();
+    if (this.riverRaf) window.cancelAnimationFrame(this.riverRaf);
     if (this.riverRO) this.riverRO.disconnect();
   }
 
@@ -2051,7 +2157,7 @@ class MatrixView extends ItemView {
       }
     }
     if (this.sky) {
-      this.riverRO = new ResizeObserver(() => this.placeRivers());
+      this.riverRO = new ResizeObserver(() => this.queuePlaceRivers());
       this.riverRO.observe(board);
       for (const qd of board.children) this.riverRO.observe(qd);
     }
@@ -2062,21 +2168,22 @@ class MatrixView extends ItemView {
   buildSky(qd, q) {
     const sky = qd.createDiv('pm-sky');
     this.skyLayers[q] = sky;
-    if (q === 2) sky.createDiv('pm-sky-band');
     if (q === 3) sky.createDiv('pm-sky-moon');
     if (q === 2) sky.createDiv('pm-sky-venus');
     if (q === 1 || q === 2) {
       for (let i = 0; i < 2; i++) sky.createDiv('pm-sky-cloud').style.setProperty('--i', String(i));
     }
     const dust = sky.createDiv('pm-sky-dust');
-    for (const d of dustLayout(hashStr(`${this.file.path}|${q}`), 28)) {
-      const s = dust.createSpan(d.big ? 'is-big' : '');
+    for (const d of dustLayout(hashStr(`${this.file.path}|${q}`), 46)) {
+      const s = dust.createSpan((d.big || d.glint ? 'is-big' : '') + (d.tw || d.glint ? ' is-tw' : '') + (d.glint ? ' is-glint' : ''));
+      s.style.setProperty('--dur', d.dur + 's');
+      if (d.glint) s.createSpan('pm-star-spark');
       s.style.left = d.x + '%';
       s.style.top = d.y + '%';
       s.style.setProperty('--o', String(d.o));
       s.style.setProperty('--d', d.d + 's');
     }
-    if (q !== 2) this.buildRiver(sky, q);
+    this.buildRiver(sky);
 
     const lines = this.sky.lines.filter(l => l.q === q);
     if (lines.length) {
@@ -2115,77 +2222,72 @@ class MatrixView extends ItemView {
     }
   }
 
-  // 星河画在整张看板的坐标里，每个象限只显示经过自己的那一段
-  buildRiver(sky, q) {
-    if (!this.river || this.river.key !== this.file.path) {
-      this.river = { key: this.file.path, stars: riverLayout(hashStr(`river|${this.file.path}`), 260) };
+  // 银河画在整张看板的坐标里，每个象限只显示经过自己的那一段
+  buildRiver(sky) {
+    if (!this.galaxy || this.galaxy.key !== this.file.path) {
+      this.galaxy = { key: this.file.path, data: galaxyLayout(hashStr(`galaxy|${this.file.path}`)), img: null, imgKey: '' };
     }
+    sky.createEl('canvas', { cls: 'pm-galaxy' });
     const box = sky.createDiv('pm-river');
-    const NS = 'http://www.w3.org/2000/svg';
-    const pts = [];
-    for (let i = 0; i <= 64; i++) {
-      const p = riverAt(i / 64);
-      pts.push(`${(p.x * 1000).toFixed(1)},${(p.y * 1000).toFixed(1)}`);
-    }
-    for (const cls of ['is-glow', 'is-haze']) {
-      const svg = document.createElementNS(NS, 'svg');
-      svg.setAttribute('class', `pm-river-band ${cls}`);
-      svg.setAttribute('viewBox', '0 0 1000 1000');
-      svg.setAttribute('preserveAspectRatio', 'none');
-      const id = `pm-river-grad-${++this.gradSeq}`;
-      const defs = document.createElementNS(NS, 'defs');
-      const grad = document.createElementNS(NS, 'linearGradient');
-      grad.setAttribute('id', id);
-      grad.setAttribute('gradientUnits', 'userSpaceOnUse');
-      grad.setAttribute('x1', '0');
-      grad.setAttribute('y1', '600');
-      grad.setAttribute('x2', '860');
-      grad.setAttribute('y2', '0');
-      for (const [off, c] of [['0', 'a'], ['0.5', 'b'], ['1', 'c']]) {
-        const st = document.createElementNS(NS, 'stop');
-        st.setAttribute('offset', off);
-        st.setAttribute('class', `pm-river-stop-${c}`);
-        grad.appendChild(st);
-      }
-      defs.appendChild(grad);
-      svg.appendChild(defs);
-      const pl = document.createElementNS(NS, 'polyline');
-      pl.setAttribute('points', pts.join(' '));
-      pl.setAttribute('vector-effect', 'non-scaling-stroke');
-      pl.setAttribute('stroke', `url(#${id})`);
-      svg.appendChild(pl);
-      box.appendChild(svg);
-    }
-    const inQ = s => (q === 3 ? s.x < 0.56 : s.x > 0.44) && (q === 1 ? s.y < 0.56 : s.y > 0.44);
-    for (const s of this.river.stars) {
-      if (!inQ(s)) continue;
-      const el = box.createSpan('pm-rstar' + (s.bright ? ' is-bright' : ''));
-      el.dataset.tone = String(s.tone);
-      el.style.left = (s.x * 100).toFixed(2) + '%';
-      el.style.top = (s.y * 100).toFixed(2) + '%';
-      el.style.setProperty('--sz', s.r + 'px');
-      el.style.setProperty('--o', String(s.o));
-      if (s.tw >= 0) {
-        el.addClass('is-tw');
-        el.style.setProperty('--tw', s.tw + 's');
-      }
-      if (s.bright) el.createSpan('pm-star-spark');
+    for (const b of this.galaxy.data.bright) {
+      const el = box.createSpan('pm-rstar is-bright');
+      el.dataset.tone = String(b.tone);
+      el.style.setProperty('--sz', b.r + 'px');
+      el.style.setProperty('--tw', b.tw + 's');
+      el.style.setProperty('--dur', b.dur + 's');
+      el.createSpan('pm-star-spark');
     }
   }
 
   placeRivers() {
     const b = this.board;
-    if (!b || !b.isConnected) return;
+    if (!b || !b.isConnected || !this.galaxy) return;
     const br = b.getBoundingClientRect();
-    for (const sky of Object.values(this.skyLayers || {})) {
-      const r = sky.querySelector('.pm-river');
-      if (!r) continue;
-      const sr = sky.getBoundingClientRect();
-      r.style.left = (br.left - sr.left) + 'px';
-      r.style.top = (br.top - sr.top) + 'px';
-      r.style.width = br.width + 'px';
-      r.style.height = br.height + 'px';
+    const W = Math.round(br.width);
+    const H = Math.round(br.height);
+    if (W < 10 || H < 10) return;
+    const dark = this.contentEl.hasClass('pm-dark');
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const key = `${W}x${H}@${dpr}|${dark}`;
+    const g = this.galaxy;
+    if (g.imgKey !== key) {
+      const r = renderGalaxy(g.data, W, H, dpr, dark);
+      g.img = r.canvas;
+      g.pos = r.bright;
+      g.imgKey = key;
     }
+    for (const sky of Object.values(this.skyLayers || {})) {
+      const box = sky.querySelector('.pm-river');
+      const cv = sky.querySelector('canvas.pm-galaxy');
+      if (!box || !cv) continue;
+      const sr = sky.getBoundingClientRect();
+      const ox = br.left - sr.left;
+      const oy = br.top - sr.top;
+      box.style.left = ox + 'px';
+      box.style.top = oy + 'px';
+      box.style.width = W + 'px';
+      box.style.height = H + 'px';
+      box.querySelectorAll('.pm-rstar').forEach((el, i) => {
+        const p = g.pos[i];
+        el.style.left = p.x.toFixed(2) + '%';
+        el.style.top = p.y.toFixed(2) + '%';
+      });
+      const cw = Math.max(1, Math.round(sr.width * dpr));
+      const ch = Math.max(1, Math.round(sr.height * dpr));
+      if (cv.width !== cw) cv.width = cw;
+      if (cv.height !== ch) cv.height = ch;
+      const ctx = cv.getContext('2d');
+      ctx.clearRect(0, 0, cw, ch);
+      ctx.drawImage(g.img, Math.round(ox * dpr), Math.round(oy * dpr));
+    }
+  }
+
+  queuePlaceRivers() {
+    if (this.riverRaf) return;
+    this.riverRaf = window.requestAnimationFrame(() => {
+      this.riverRaf = 0;
+      this.placeRivers();
+    });
   }
 
   // 鼠标移到某一行：点亮它的星星和所属主线的星座
@@ -2231,13 +2333,16 @@ class MatrixView extends ItemView {
   meteor() {
     if (!this.settings.sky || !this.fxOn() || document.hidden) return;
     if (!this.contentEl.hasClass('pm-dark') || !this.board || !this.board.isConnected) return;
-    if (Math.random() < 0.45) return;
+    if (Math.random() < 0.25) return;
     const skies = Object.values(this.skyLayers || {}).filter(s => s.isConnected);
     if (!skies.length) return;
     const sky = skies[Math.floor(Math.random() * skies.length)];
     const m = sky.createDiv('pm-meteor');
-    m.style.left = (45 + Math.random() * 50) + '%';
-    m.style.top = (Math.random() * 45) + '%';
+    m.style.left = (40 + Math.random() * 55) + '%';
+    m.style.top = (Math.random() * 50) + '%';
+    m.style.setProperty('--len', Math.round(60 + Math.random() * 70) + 'px');
+    m.style.setProperty('--ang', Math.round(-22 - Math.random() * 22) + 'deg');
+    m.style.setProperty('--dur', (0.8 + Math.random() * 0.6).toFixed(2) + 's');
     m.addEventListener('animationend', () => m.remove());
   }
 
@@ -3006,8 +3111,10 @@ module.exports._test = {
   rng,
   skyLayout,
   dustLayout,
-  riverAt,
-  riverLayout,
+  galaxyAt,
+  galaxyWidth,
+  galaxyLayout,
+  renderGalaxy,
   parsePeriod,
   defaultEnd,
   splitLines,
