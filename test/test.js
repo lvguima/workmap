@@ -230,4 +230,139 @@ assert.deepStrictEqual(T.galaxyLayout(99), gl);
 assert.notDeepStrictEqual(T.galaxyLayout(98).stars[0], gl.stars[0]);
 assert.strictEqual(gl.bright.length, 16);
 assert.ok(gl.stars.length > 2000);
-console.log('ALL PASS');
+// ---------- 自动顺延 ----------
+const mkPeriod = path => T.parsePeriod({ path });
+const cp = mkPeriod('2026/11/18-30.md');
+const cl = [
+  '## 周期任务', '', '---', '',
+  '## 20', '', '- [ ] 今天的', '',
+  '## 19', '', '- [ ] 没做完 %%t:09-11%% %%m:75,20%%', '  备注', '- [x] 做完了', '- [>] 早就顺延了', '- [ ]', '',
+  '## 18', '', '- [ ] 更早的',
+];
+const today20 = moment('2026-11-20', 'YYYY-MM-DD');
+const ci = T.collectCarry(cl, cp, today20);
+assert.deepStrictEqual(ci.map(i => i.info.text), ['没做完', '更早的']);
+// 清掉时段，保留象限和备注
+assert.deepStrictEqual(ci[0].block, ['- [ ] 没做完 %%m:75,20%%', '  备注']);
+assert.strictEqual(ci[0].info.from, '11/19');
+const cl2 = [...cl];
+T.markCarried(cl2, ci);
+assert.strictEqual(cl2[10], '- [>] 没做完 %%t:09-11%% %%m:75,20%%');
+assert.strictEqual(cl2[18], '- [>] 更早的');
+// 标记后再收集，什么都不会重复
+assert.strictEqual(T.collectCarry(cl2, cp, today20).length, 0);
+
+// ---------- 输入法回车 ----------
+assert.strictEqual(T.isSubmitKey({ key: 'Enter', isComposing: false, keyCode: 13 }), true);
+assert.strictEqual(T.isSubmitKey({ key: 'Enter', isComposing: true, keyCode: 13 }), false);
+assert.strictEqual(T.isSubmitKey({ key: 'Enter', isComposing: false, keyCode: 229 }), false);
+
+// ---------- 新建一期 ----------
+const P = [mkPeriod('2026/11/1-10.md'), mkPeriod('2026/11/11-17.md'), mkPeriod('2026/11/18-30.md'), mkPeriod('2026/12/15-31.md')]
+  .sort((a, b) => b.startDate.valueOf() - a.startDate.valueOf());
+const D = s => moment(s, 'YYYY-MM-DD', true);
+assert.strictEqual(T.periodProblem(D('2026-12-01'), D('2026-12-10'), P), '');
+assert.match(T.periodProblem(D('2026-12-10'), D('2026-12-01'), P), /不能早于/);
+assert.match(T.periodProblem(D('2026-12-25'), D('2027-01-03'), P), /同一个月/);
+assert.match(T.periodProblem(D('2026-11-25'), D('2026-11-30'), P), /重叠/);
+assert.match(T.periodProblem(D('2026-12-10'), D('2026-12-20'), P), /重叠/);
+assert.match(T.periodProblem(D('2026-02-30'), D('2026-02-31'), P), /格式/);
+// 今天在 11/18-30 里：从 12/1 开始，到 12/10
+let sg = T.suggestPeriod(D('2026-11-20'), P);
+assert.deepStrictEqual([sg.start.format('YYYY-MM-DD'), sg.end.format('YYYY-MM-DD')], ['2026-12-01', '2026-12-10']);
+// 今天在 11/1-10，后面几期都建好了：跳过它们，从 12/1 开始
+sg = T.suggestPeriod(D('2026-11-05'), P);
+assert.strictEqual(sg.start.format('YYYY-MM-DD'), '2026-12-01');
+// 结束日碰到后面已有的一期，停在它前一天
+assert.strictEqual(T.periodEndFor(D('2026-12-11'), P).format('YYYY-MM-DD'), '2026-12-14');
+assert.strictEqual(T.periodEndFor(D('2026-12-01'), P).format('YYYY-MM-DD'), '2026-12-10');
+
+// ---------- 模板 ----------
+const blocks = [['- [ ] 主线 A %%id:pa%%', '  备注'], ['- [ ] 主线 B']];
+assert.strictEqual(T.fillTemplate('## 周期任务\n\n{{tasks}}\n\n---\n\n## {{day}}\n', blocks, '01'),
+  '## 周期任务\n\n- [ ] 主线 A %%id:pa%%\n  备注\n- [ ] 主线 B\n\n---\n\n## 01\n');
+// 模板里没有 {{tasks}}：放到「## 周期任务」下面
+assert.strictEqual(T.fillTemplate('# 计划\n## 周期任务\n\n---\n## {{day}}\n', blocks, '01'),
+  '# 计划\n## 周期任务\n\n- [ ] 主线 A %%id:pa%%\n  备注\n- [ ] 主线 B\n\n---\n## 01\n');
+// 连「## 周期任务」都没有：加在最前面
+const noSec = T.fillTemplate('## {{day}}\n', blocks, '01');
+assert.ok(noSec.startsWith('## 周期任务\n\n- [ ] 主线 A %%id:pa%%\n  备注\n- [ ] 主线 B\n\n## 01'));
+assert.strictEqual(T.fillTemplate('## {{day}}\n', [], '01'), '## 01\n');
+// 任务文字里的 {{day}} 不会被替换
+assert.ok(T.fillTemplate('{{tasks}}\n## {{day}}', [['- [ ] 写 {{day}} 模板']], '05').includes('写 {{day}} 模板'));
+
+// ---------- 无效日期 ----------
+assert.ok(Number.isNaN(T.daysUntil('2026-02-30')));
+assert.strictEqual(T.countdown('2026-02-30').short, '日期无效');
+// ---------- 时区 ----------
+const zi = new Date('2026-11-21T02:40:00Z');
+assert.strictEqual(T.momentIn(zi, 'America/Chicago').format('YYYY-MM-DD HH:mm'), '2026-11-20 20:40');
+assert.strictEqual(T.momentIn(zi, 'Asia/Hong_Kong').format('YYYY-MM-DD HH:mm'), '2026-11-21 10:40');
+assert.strictEqual(T.momentIn(zi, 'Europe/Paris').format('YYYY-MM-DD HH:mm'), '2026-11-21 03:40');
+// 夏令时
+const zs = new Date('2026-07-01T12:00:00Z');
+assert.strictEqual(T.momentIn(zs, 'America/New_York').format('HH:mm'), '08:00');
+assert.strictEqual(T.momentIn(zs, 'Europe/Paris').format('HH:mm'), '14:00');
+// 午夜不能变成 24 点
+assert.strictEqual(T.zoneParts(new Date('2026-11-20T16:00:00Z'), 'Asia/Hong_Kong').hour, 0);
+assert.strictEqual(T.utcOffsetLabel(zi, 'Asia/Hong_Kong'), 'UTC+8');
+assert.strictEqual(T.utcOffsetLabel(zi, 'America/Chicago'), 'UTC-6');
+assert.strictEqual(T.utcOffsetLabel(zs, 'Europe/Paris'), 'UTC+2');
+assert.strictEqual(T.zoneTz('us', 'America/Denver'), 'America/Denver');
+assert.strictEqual(T.zoneTz('hk', 'America/Denver'), 'Asia/Hong_Kong');
+assert.strictEqual(T.zoneTz('', 'America/Denver'), '');
+assert.strictEqual(T.guessZone('America/Chicago'), 'us');
+assert.strictEqual(T.guessZone('Europe/Paris'), 'paris');
+assert.strictEqual(T.guessZone('Asia/Tokyo'), '');
+
+// 切时区不写笔记；「今天」往后跳时先不顺延，确认后才顺延
+async function zoneFlow() {
+  const RealDate = Date;
+  let fixed = new RealDate('2026-11-21T02:40:00Z').getTime();
+  global.Date = class extends RealDate {
+    constructor(...a) { if (a.length) super(...a); else super(fixed); }
+    static now() { return fixed; }
+  };
+  try {
+    const Plugin = require('../main.js');
+    const note = ['## 周期任务', '', '---', '', '## 20', '', '- [ ] 没做完 %%m:75,20%%', ''].join('\n');
+    const file = { path: '2026/11/18-30.md', data: note };
+    const pl = new Plugin();
+    pl.app = {
+      vault: {
+        getMarkdownFiles: () => [file],
+        read: async f => f.data,
+        process: async (f, fn) => { f.data = fn(f.data); return f.data; },
+      },
+      workspace: { getLeavesOfType: () => [] },
+    };
+    pl.saveData = async () => {};
+    pl.settings = { carry: null, carryHold: '', zone: 'us', usZone: 'America/Chicago' };
+    await pl.setZone('us');
+    await pl.setZone('hk');
+    assert.strictEqual(pl.settings.carryHold, '2026-11-21');
+    assert.strictEqual(file.data, note);
+    const hkToday = moment('2026-11-21', 'YYYY-MM-DD');
+    assert.strictEqual(await pl.carryOver(hkToday), 0);
+    assert.strictEqual(file.data, note);
+    assert.strictEqual((await pl.pendingCarry(hkToday)).length, 1);
+    // 切回去：今天往前，解除暂缓，笔记没变
+    await pl.setZone('us');
+    assert.strictEqual(pl.settings.carryHold, '');
+    assert.strictEqual(file.data, note);
+    // 再切过去并确认顺延
+    await pl.setZone('paris');
+    assert.strictEqual(pl.settings.carryHold, '2026-11-21');
+    await pl.releaseCarry();
+    assert.strictEqual(await pl.carryOver(hkToday), 1);
+    assert.ok(file.data.includes('- [>] 没做完'));
+    assert.ok(/## 21\n[\s\S]*- \[ \] 没做完/.test(file.data));
+    // 到了下一天，暂缓自动失效
+    pl.settings.carryHold = '2026-11-21';
+    assert.strictEqual(pl.carryHeld(moment('2026-11-22', 'YYYY-MM-DD')), false);
+    await pl.setZone('us');
+  } finally {
+    global.Date = RealDate;
+  }
+}
+zoneFlow().then(() => console.log('ALL PASS')).catch(e => { console.error(e); process.exit(1); });

@@ -1,7 +1,7 @@
 {
   "id": "workmap",
   "name": "Workmap",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "minAppVersion": "1.4.0",
   "description": "把时段笔记里的周期任务和每日任务放进艾森豪威尔四象限，和 md 文件双向同步。",
   "author": "idc",

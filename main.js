@@ -44,7 +44,21 @@ const DEFAULT_SETTINGS = {
   carry: null,
   fx: true,
   sky: true,
+  carryHold: '',
 };
+
+// 时区：key 存在设置里。美国有多个时区，具体用哪个由 usZone 决定
+const ZONES = [
+  { key: 'us', label: '美国' },
+  { key: 'hk', label: '香港', tz: 'Asia/Hong_Kong' },
+  { key: 'paris', label: '巴黎', tz: 'Europe/Paris' },
+];
+const US_ZONES = [
+  ['America/New_York', '东部', '东部（纽约）'],
+  ['America/Chicago', '中部', '中部（芝加哥）'],
+  ['America/Denver', '山地', '山地（丹佛）'],
+  ['America/Los_Angeles', '西部', '西部（洛杉矶）'],
+];
 
 // x/y 仍写进 %%m:x,y%%：x、y 决定象限，y 同时决定象限内的排序
 const QUADS = {
@@ -104,6 +118,66 @@ function pad(n) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+// ---------- 时区 ----------
+// 笔记里的日期都是「墙上时间」，所以这里把所选时区的当前时间换成一个同样读数的本地 moment，
+// 其余的日期比较、加减都不用改。没有选时区（activeTz 为空）时就是系统时间。
+
+let activeTz = '';
+const zoneFormats = new Map();
+
+function zoneParts(date, tz) {
+  if (!zoneFormats.has(tz)) {
+    zoneFormats.set(tz, new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+    }));
+  }
+  const out = {};
+  for (const { type, value } of zoneFormats.get(tz).formatToParts(date)) {
+    if (type !== 'literal') out[type] = +value;
+  }
+  return out;
+}
+
+function momentIn(date, tz) {
+  const p = zoneParts(date, tz);
+  return moment({ year: p.year, month: p.month - 1, date: p.day, hour: p.hour, minute: p.minute, second: p.second });
+}
+
+function zoneNow() {
+  return activeTz ? momentIn(new Date(), activeTz) : moment();
+}
+
+// 小时单独取：本地时区夏令时跳过的那一小时，换算成本地 moment 后读数会偏
+function zoneHour() {
+  return activeTz ? zoneParts(new Date(), activeTz).hour : moment().hour();
+}
+
+function zoneTz(key, usZone) {
+  if (key === 'us') return usZone;
+  const z = ZONES.find(x => x.key === key);
+  return (z && z.tz) || '';
+}
+
+function guessZone(sys) {
+  if (US_ZONES.some(z => z[0] === sys)) return 'us';
+  return (ZONES.find(z => z.tz === sys) || { key: '' }).key;
+}
+
+function utcOffsetLabel(date, tz) {
+  const p = zoneParts(date, tz);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  const mins = Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);
+  const abs = Math.abs(mins);
+  return `UTC${mins < 0 ? '-' : '+'}${Math.floor(abs / 60)}${abs % 60 ? ':' + pad(abs % 60) : ''}`;
 }
 
 function newId() {
@@ -322,6 +396,39 @@ function insertTaskBlock(lines, range, block) {
   if (at < lines.length && lines[at].trim() !== '') ins.push('');
   if (at > 0 && HABIT_RE.test(lines[at - 1])) ins.unshift('');
   lines.splice(at, 0, ...ins);
+}
+
+// 自动顺延：找出某一期里早于 today 的未完成每日任务（任务行连同备注）。
+// line 是任务行在 lines 里的位置，markCarried 要在同一份 lines 上用它。
+function collectCarry(lines, p, today) {
+  const out = [];
+  for (const d of listDays(lines)) {
+    if (d.day > p.startDate.daysInMonth()) continue;
+    const date = p.startDate.clone().date(d.day);
+    if (!date.isBefore(today, 'day')) continue;
+    for (let i = d.start + 1; i < d.end; i++) {
+      const t = parseTaskLine(lines[i], i);
+      if (!t || t.done || !t.text) continue;
+      const kids = countChildren(lines, i, d.end);
+      const block = [formatTask(Object.assign({}, t, { slot: '' })), ...lines.slice(i + 1, i + 1 + kids)];
+      out.push({
+        line: i,
+        raw: lines[i],
+        block,
+        info: { raw: block[0], text: t.text, from: `${p.month}/${d.day}` },
+      });
+    }
+  }
+  return out;
+}
+
+function markCarried(lines, items) {
+  for (const it of items) lines[it.line] = lines[it.line].replace(/^- \[ \]/, '- [>]');
+}
+
+// 中文输入法选字时按的回车不算提交。Safari / iPad 上这时 isComposing 可能已经是 false，但 keyCode 仍是 229
+function isSubmitKey(e) {
+  return e.key === 'Enter' && !e.isComposing && e.keyCode !== 229;
 }
 
 function quadOf(t) {
@@ -717,12 +824,65 @@ function defaultEnd(start) {
   return start.clone().date(last);
 }
 
+function inPeriod(p, d) {
+  return !d.isBefore(p.startDate, 'day') && !d.isAfter(p.endDate, 'day');
+}
+
+// 新建一期的日期有什么问题；没问题返回空字符串
+function periodProblem(start, end, periods) {
+  if (!start.isValid() || !end.isValid()) return '日期格式不对';
+  if (end.isBefore(start, 'day')) return '结束日期不能早于开始日期';
+  if (start.year() !== end.year() || start.month() !== end.month()) return '开始和结束日期需要在同一个月';
+  const clash = periods.find(p => !(end.isBefore(p.startDate, 'day') || start.isAfter(p.endDate, 'day')));
+  if (clash) return `和已有的 ${clash.file.path} 日期重叠`;
+  return '';
+}
+
+// 新建一期的默认日期：从今天（或今天所在那一期的下一天）开始，跳过已经建好的期，结束日不和后面的期重叠
+function suggestPeriod(today, periods) {
+  let start = today.clone().startOf('day');
+  for (let p = periods.find(x => inPeriod(x, start)); p; p = periods.find(x => inPeriod(x, start))) {
+    start = p.endDate.clone().add(1, 'day');
+  }
+  return { start, end: periodEndFor(start, periods) };
+}
+
+// 给定开始日的默认结束日：10 日、20 日或月末，碰到后面已有的一期就停在它前一天
+function periodEndFor(start, periods) {
+  const end = defaultEnd(start);
+  const next = periods
+    .filter(x => x.startDate.isAfter(start, 'day') && !x.startDate.isAfter(end, 'day'))
+    .sort((a, b) => a.startDate.valueOf() - b.startDate.valueOf())[0];
+  return next ? next.startDate.clone().subtract(1, 'day') : end;
+}
+
+// 用模板生成新一期的内容。模板里没有 {{tasks}} 时，迁移的任务放到「## 周期任务」下面
+// （没有这一节就加在最前面），不能因为模板没写占位符就把它们弄丢
+function fillTemplate(tpl, blocks, day) {
+  const content = tpl.split('{{day}}').join(day);
+  if (content.includes('{{tasks}}')) return content.split('{{tasks}}').join(blocks.map(b => b.join('\n')).join('\n'));
+  if (!blocks.length) return content;
+  const { lines, eol } = splitLines(content);
+  const r = periodRange(lines);
+  const ins = blocks.flat();
+  if (r) lines.splice(r.start + 1, 0, '', ...ins);
+  else lines.unshift('## 周期任务', '', ...ins, '');
+  return lines.join(eol);
+}
+
+function parseDate(v) {
+  const d = moment(v, 'YYYY-MM-DD', true);
+  return d.isValid() ? d : null;
+}
+
 function daysUntil(due) {
-  return moment(due, 'YYYY-MM-DD').diff(moment().startOf('day'), 'days');
+  const d = parseDate(due);
+  return d ? d.diff(zoneNow().startOf('day'), 'days') : NaN;
 }
 
 function countdown(due) {
   const n = daysUntil(due);
+  if (Number.isNaN(n)) return { text: `${due} · 日期无效`, short: '日期无效', cls: 'is-over' };
   const d = moment(due, 'YYYY-MM-DD');
   const md = `${d.month() + 1}/${d.date()}`;
   if (n < 0) return { text: `${md} · 已过期 ${-n} 天`, short: `过期 ${-n} 天`, cls: 'is-over' };
@@ -798,20 +958,24 @@ function buildStars(parent, level, onChange, extra) {
 }
 
 function buildDatePicker(parent, opts) {
-  const today = moment().startOf('day');
+  const today = zoneNow().startOf('day');
   const wrap = parent.createDiv('pm-dp');
   let value = opts.value || '';
   let open = false;
-  let view = (value ? moment(value, 'YYYY-MM-DD') : today.clone()).startOf('month');
+  // 手写的日期可能不合法（比如 2026-02-30），这时日历从今天所在的月开始
+  const monthOf = v => (parseDate(v) || today.clone()).startOf('month');
+  let view = monthOf(value);
 
   let quick = opts.quick;
   if (!quick) {
     const fri = today.clone().isoWeekday(5);
+    // 今天是周五时，「今天」已经有了，这一项就是下周五
+    const friLabel = today.isoWeekday() === 5 ? '下周五' : '周五';
     if (!fri.isAfter(today, 'day')) fri.add(1, 'week');
     quick = [
       ['今天', today.clone()],
       ['明天', today.clone().add(1, 'day')],
-      ['周五', fri],
+      [friLabel, fri],
       ['下周一', today.clone().isoWeekday(8)],
       ['一周后', today.clone().add(7, 'day')],
     ];
@@ -824,7 +988,7 @@ function buildDatePicker(parent, opts) {
 
   const set = v => {
     value = v;
-    if (v) view = moment(v, 'YYYY-MM-DD').startOf('month');
+    if (v) view = monthOf(v);
     opts.onChange(v);
     draw();
   };
@@ -832,13 +996,16 @@ function buildDatePicker(parent, opts) {
   function draw() {
     field.empty();
     setIcon(field.createSpan('pm-dp-icon'), 'calendar');
-    if (value) {
-      const d = moment(value, 'YYYY-MM-DD');
+    const d = value ? parseDate(value) : null;
+    if (d) {
       field.createSpan({ cls: 'pm-dp-value', text: `${d.year()}年${d.month() + 1}月${d.date()}日 周${WEEK[d.day()]}` });
       if (!opts.noCountdown) {
         const c = countdown(value);
         field.createSpan({ cls: `pm-pill ${c.cls}`, text: c.short });
       }
+    } else if (value) {
+      field.createSpan({ cls: 'pm-dp-value', text: value });
+      field.createSpan({ cls: 'pm-pill is-over', text: '日期无效，请重新选择' });
     } else {
       field.createSpan({ cls: 'pm-dp-placeholder', text: opts.placeholder || '不设截止日期' });
     }
@@ -902,14 +1069,27 @@ function buildDatePicker(parent, opts) {
 
   field.onclick = () => {
     open = !open;
-    if (open) view = (value ? moment(value, 'YYYY-MM-DD') : today.clone()).startOf('month');
+    if (open) view = monthOf(value);
     draw();
   };
+  // 点日历以外的地方就收起日历。选择器被移除后，下一次点击时顺手卸掉监听
+  const doc = wrap.ownerDocument;
+  const onDocDown = e => {
+    if (!wrap.isConnected) {
+      doc.removeEventListener('pointerdown', onDocDown, true);
+      return;
+    }
+    if (open && !wrap.contains(e.target)) {
+      open = false;
+      draw();
+    }
+  };
+  doc.addEventListener('pointerdown', onDocDown, true);
   draw();
   return {
     setValue(v) {
       value = v;
-      if (v) view = moment(v, 'YYYY-MM-DD').startOf('month');
+      if (v) view = monthOf(v);
       draw();
     },
   };
@@ -922,6 +1102,12 @@ class WorkmapPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.carrying = false;
     this.history = [];
+    const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (this.settings.zone === undefined) this.settings.zone = guessZone(sys);
+    if (!US_ZONES.some(z => z[0] === this.settings.usZone)) {
+      this.settings.usZone = US_ZONES.some(z => z[0] === sys) ? sys : 'America/New_York';
+    }
+    activeTz = zoneTz(this.settings.zone, this.settings.usZone);
 
     this.registerView(VIEW_TYPE, leaf => new MatrixView(leaf, this));
     this.addRibbonIcon('layout-grid', '打开 Workmap', () => this.activateView());
@@ -938,6 +1124,37 @@ class WorkmapPlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.refreshViews();
+  }
+
+  // 切时区只改显示，不写笔记。切完如果「今天」往后跳了，这一天先不自动顺延，
+  // 否则点一下切换，没做完的任务就被改到了新日期，切回来也还原不了。
+  async setZone(key, usZone = this.settings.usZone) {
+    const before = zoneNow().startOf('day');
+    this.settings.zone = key;
+    this.settings.usZone = usZone;
+    activeTz = zoneTz(key, usZone);
+    const after = zoneNow().startOf('day');
+    if (after.isAfter(before, 'day')) this.settings.carryHold = after.format('YYYY-MM-DD');
+    else if (after.isBefore(before, 'day')) this.settings.carryHold = '';
+    await this.saveSettings();
+  }
+
+  carryHeld(today) {
+    return this.settings.carryHold === today.format('YYYY-MM-DD');
+  }
+
+  async releaseCarry() {
+    this.settings.carryHold = '';
+    await this.saveSettings();
+  }
+
+  // 只读：现在如果顺延，会搬哪些任务
+  async pendingCarry(today) {
+    const cur = this.periodFor(today);
+    if (!cur) return [];
+    const prev = this.periods().find(p => p.endDate.isBefore(cur.startDate, 'day'));
+    const read = async p => collectCarry(splitLines(await this.app.vault.read(p.file)).lines, p, today);
+    return [...(prev ? await read(prev) : []), ...await read(cur)];
   }
 
   periods() {
@@ -1025,6 +1242,7 @@ class WorkmapPlugin extends Plugin {
 
   async updateMany(file, scope, items) {
     if (!items.length) return true;
+    const pairs = [];
     const ok = await this.mutate(file, lines => {
       const r = rangeOf(lines, scope);
       if (!r) return false;
@@ -1040,16 +1258,20 @@ class WorkmapPlugin extends Plugin {
         if (idx < 0) return false;
         used.add(idx);
         lines[idx] = formatTask(Object.assign({}, task, patch));
+        pairs.push([task.raw, lines[idx]]);
       }
     });
     if (!ok) {
       new Notice('笔记内容刚刚变化过，已刷新，请再操作一次');
       this.refreshViews();
+    } else {
+      this.remapCarry(pairs);
     }
     return ok;
   }
 
   async updateTask(file, scope, task, patch) {
+    let raw = null;
     const ok = await this.mutate(file, lines => {
       const r = rangeOf(lines, scope);
       const idx = r ? findRaw(lines, r, task.raw) : -1;
@@ -1059,15 +1281,35 @@ class WorkmapPlugin extends Plugin {
         lines.splice(idx, 1 + kids);
       } else if (patch.note !== undefined) {
         lines.splice(idx, 1 + kids, ...taskBlock(Object.assign({}, task, patch)));
+        raw = lines[idx];
       } else {
         lines[idx] = formatTask(Object.assign({}, task, patch));
+        raw = lines[idx];
       }
     });
     if (!ok) {
       new Notice('笔记内容刚刚变化过，已刷新，请再操作一次');
       this.refreshViews();
+    } else if (raw !== null) {
+      this.remapCarry([[task.raw, raw]]);
     }
     return ok;
+  }
+
+  // 顺延记录按行文本匹配。顺延来的任务被拖动、编辑、打勾后行文本会变，
+  // 这里跟着改记录，「顺延」标签和顶部提示里的条目才不会消失
+  remapCarry(pairs) {
+    const c = this.settings.carry;
+    if (!c || !Array.isArray(c.items)) return;
+    let hit = false;
+    for (const it of c.items) {
+      const p = pairs.find(x => x[0] === it.raw && x[1] !== it.raw);
+      if (p) {
+        it.raw = p[1];
+        hit = true;
+      }
+    }
+    if (hit) this.saveData(this.settings);
   }
 
   async addPeriodTask(file, task) {
@@ -1123,54 +1365,47 @@ class WorkmapPlugin extends Plugin {
   // ----- 自动顺延 -----
 
   async carryOver(today) {
-    if (this.carrying) return 0;
+    if (this.carrying || this.carryHeld(today)) return 0;
     this.carrying = true;
     try {
       const cur = this.periodFor(today);
       if (!cur) return 0;
       const prev = this.periods().find(p => p.endDate.isBefore(cur.startDate, 'day'));
 
-      const pick = async p => {
-        const { lines } = splitLines(await this.app.vault.read(p.file));
-        const out = [];
-        for (const d of listDays(lines)) {
-          if (d.day > p.startDate.daysInMonth()) continue;
-          const date = p.startDate.clone().date(d.day);
-          if (!date.isBefore(today, 'day')) continue;
-          for (let i = d.start + 1; i < d.end; i++) {
-            const t = parseTaskLine(lines[i], i);
-            if (!t || t.done || !t.text) continue;
-            const kids = countChildren(lines, i, d.end);
-            const block = [formatTask(Object.assign({}, t, { slot: '' })), ...lines.slice(i + 1, i + 1 + kids)];
-            out.push({
-              day: d.day,
-              raw: lines[i],
-              block,
-              info: { raw: block[0], text: t.text, from: `${p.month}/${d.day}` },
-            });
-          }
+      // 读出要顺延的任务和把原行标成 [>] 放在同一次 vault.process 里完成。
+      // 以前是先 read 再另起一次写入，中间如果笔记被改过，原行可能没标上，下次又会顺延一遍，出现重复。
+      let fromPrev = [];
+      if (prev) {
+        await this.mutate(prev.file, lines => {
+          fromPrev = collectCarry(lines, prev, today);
+          if (!fromPrev.length) return false;
+          markCarried(lines, fromPrev);
+        }, false);
+      }
+      let fromCur = [];
+      try {
+        await this.mutate(cur.file, lines => {
+          fromCur = collectCarry(lines, cur, today);
+          if (!fromPrev.length && !fromCur.length) return false;
+          markCarried(lines, fromCur);
+          insertTaskBlock(lines, ensureDay(lines, today.date()), [...fromPrev, ...fromCur].flatMap(it => it.block));
+        }, false);
+      } catch (e) {
+        // 本期没写进去：把上一期标上的 [>] 改回来，任务不能丢
+        console.error('[workmap] 顺延失败', e);
+        if (fromPrev.length) {
+          await this.mutate(prev.file, lines => {
+            for (const it of fromPrev) {
+              const idx = lines.indexOf(it.raw.replace(/^- \[ \]/, '- [>]'));
+              if (idx >= 0) lines[idx] = it.raw;
+            }
+          }, false);
         }
-        return out;
-      };
-      const mark = (lines, items) => {
-        for (const it of items) {
-          const r = dayRange(lines, it.day);
-          const idx = r ? findRaw(lines, r, it.raw) : -1;
-          if (idx >= 0) lines[idx] = lines[idx].replace('- [ ]', '- [>]');
-        }
-      };
-
-      const fromPrev = prev ? await pick(prev) : [];
-      const fromCur = await pick(cur);
+        new Notice('自动顺延失败，详情见开发者控制台');
+        return 0;
+      }
       const total = fromPrev.length + fromCur.length;
       if (!total) return 0;
-
-      await this.mutate(cur.file, lines => {
-        mark(lines, fromCur);
-        const r = ensureDay(lines, today.date());
-        insertTaskBlock(lines, r, [...fromPrev, ...fromCur].flatMap(it => it.block));
-      }, false);
-      if (fromPrev.length) await this.mutate(prev.file, lines => mark(lines, fromPrev), false);
 
       const date = today.format('YYYY-MM-DD');
       const old = this.settings.carry && this.settings.carry.date === date ? this.settings.carry.items : [];
@@ -1189,10 +1424,8 @@ class WorkmapPlugin extends Plugin {
   // ----- 新建时段笔记 -----
 
   openNewPeriodModal() {
-    const today = moment().startOf('day');
-    const cur = this.periodFor(today);
-    const start = cur ? cur.endDate.clone().add(1, 'day') : today.clone();
-    new NewPeriodModal(this, start, defaultEnd(start)).open();
+    const { start, end } = suggestPeriod(zoneNow().startOf('day'), this.periods());
+    new NewPeriodModal(this, start, end).open();
   }
 
   async loadTemplate() {
@@ -1203,19 +1436,9 @@ class WorkmapPlugin extends Plugin {
 
   async createPeriod(start, end, migrate) {
     const { vault } = this.app;
-    if (start.year() !== end.year() || start.month() !== end.month()) {
-      new Notice('开始和结束日期需要在同一个月');
-      return null;
-    }
-    if (end.isBefore(start, 'day')) {
-      new Notice('结束日期不能早于开始日期');
-      return null;
-    }
-    const clash = this.periods().find(
-      p => !(end.isBefore(p.startDate, 'day') || start.isAfter(p.endDate, 'day')),
-    );
-    if (clash) {
-      new Notice(`和已有的 ${clash.file.path} 日期重叠`);
+    const problem = periodProblem(start, end, this.periods());
+    if (problem) {
+      new Notice(problem);
       return null;
     }
 
@@ -1237,12 +1460,10 @@ class WorkmapPlugin extends Plugin {
       }
     }
 
-    const today = moment().startOf('day');
+    const today = zoneNow().startOf('day');
     const inRange = !today.isBefore(start, 'day') && !today.isAfter(end, 'day');
     const day = pad(inRange ? today.date() : start.date());
-    const content = (await this.loadTemplate())
-      .split('{{tasks}}').join(moved.map(m => m.block.join('\n')).join('\n'))
-      .split('{{day}}').join(day);
+    const content = fillTemplate(await this.loadTemplate(), moved.map(m => m.block), day);
 
     if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
     const file = await vault.create(path, content);
@@ -1261,7 +1482,7 @@ class WorkmapPlugin extends Plugin {
   }
 
   async gotoToday() {
-    const today = moment();
+    const today = zoneNow();
     const p = this.periodFor(today);
     if (!p) {
       new Notice('今天还没有对应的时段笔记，先新建一期');
@@ -1352,6 +1573,7 @@ class MatrixView extends ItemView {
     this.registerEvent(this.app.workspace.on('css-change', () => this.requestRefresh()));
     this.registerInterval(window.setInterval(() => this.requestRefresh(), 5 * 60 * 1000));
     this.registerInterval(window.setInterval(() => this.meteor(), 6000));
+    this.registerInterval(window.setInterval(() => this.tickClock(), 10000));
     this.registerDomEvent(document, 'keydown', e => {
       if (this.app.workspace.getActiveViewOfType(MatrixView) !== this) return;
       if (e.target.closest && e.target.closest('input, textarea, select, .modal')) return;
@@ -1399,6 +1621,13 @@ class MatrixView extends ItemView {
 
   dayScope() {
     return { kind: 'day', day: this.day.date() };
+  }
+
+  // 时钟每 10 秒走一次；跨小时、跨天时刷新，「今天」和当前时段才跟得上
+  tickClock() {
+    if (this.clockEl && this.clockEl.isConnected) this.clockEl.setText(zoneNow().format('HH:mm'));
+    const key = zoneNow().format('YYYY-MM-DD HH');
+    if (this.clockKey && key !== this.clockKey && !this.dragging) this.requestRefresh();
   }
 
   // ----- 撤销提示 -----
@@ -1541,7 +1770,7 @@ class MatrixView extends ItemView {
   // 显示用的「今天」在本期里是第几日（本期没开始取开始日，已结束取结束日）
   statDay() {
     const p = this.period;
-    const today = moment().startOf('day');
+    const today = zoneNow().startOf('day');
     if (today.isBefore(p.startDate, 'day')) return p.start;
     if (today.isAfter(p.endDate, 'day')) return p.endDate.date();
     return today.date();
@@ -1624,7 +1853,14 @@ class MatrixView extends ItemView {
   // ----- 渲染 -----
 
   async render() {
-    const today = moment().startOf('day');
+    const today = zoneNow().startOf('day');
+    this.clockKey = zoneNow().format('YYYY-MM-DD HH');
+    // 正在看的那天因为切时区或跨天变成了今天，就回到跟随今天
+    if (!this.follow && this.dayDate && this.dayDate.isSame(today, 'day')) {
+      this.follow = true;
+      this.selectedPath = null;
+      this.dayDate = null;
+    }
     const periods = this.plugin.periods();
     if (this.follow) {
       this.period = this.plugin.periodFor(today);
@@ -1645,11 +1881,16 @@ class MatrixView extends ItemView {
       else this.day = inRange(today) ? today.clone() : this.period.startDate.clone();
     }
 
+    let held = [];
     if (this.period && this.follow && this.day.isSame(today, 'day')) {
-      const moved = await this.plugin.carryOver(today);
-      if (moved) {
-        this.again = true;
-        return;
+      if (this.plugin.carryHeld(today)) {
+        if (this.holdSkipped !== today.format('YYYY-MM-DD')) held = await this.plugin.pendingCarry(today);
+      } else {
+        const moved = await this.plugin.carryOver(today);
+        if (moved) {
+          this.again = true;
+          return;
+        }
       }
     }
 
@@ -1704,6 +1945,7 @@ class MatrixView extends ItemView {
     this.carried = new Set(showCarry ? carry.items.map(i => i.raw) : []);
 
     this.buildHero(el, periods, today);
+    if (held.length) this.buildCarryHold(el, held, today);
     if (showCarry && !carry.dismissed) this.buildCarry(el, carry);
     this.buildPeriodSection(el);
     this.buildHabits(el, today);
@@ -1746,10 +1988,14 @@ class MatrixView extends ItemView {
       const nth = clamp(today.diff(p.startDate, 'days') + 1, 0, total);
       const prog = main.createDiv('pm-pprog');
       const track = prog.createDiv('pm-pprog-track');
-      track.createDiv('pm-pprog-fill').style.width = (nth / total * 100) + '%';
+      // 进度线放在 rail 里，在月亮的位置挖一个洞，月牙的凹口里才不会有线穿过
+      const rail = track.createDiv('pm-pprog-rail');
+      rail.createDiv('pm-pprog-line').createDiv('pm-pprog-fill').style.width = (nth / total * 100) + '%';
       const sel = clamp(day.diff(p.startDate, 'days'), 0, total - 1);
+      const moonX = ((sel + 0.5) / total * 100) + '%';
+      rail.style.setProperty('--pm-moon-x', moonX);
       const mark = track.createDiv('pm-pprog-mark');
-      mark.style.left = ((sel + 0.5) / total * 100) + '%';
+      mark.style.left = moonX;
       let text;
       if (today.isBefore(p.startDate, 'day')) text = `${p.startDate.diff(today, 'days')} 天后开始 · 共 ${total} 天`;
       else if (today.isAfter(p.endDate, 'day')) text = `本期已结束 · 共 ${total} 天`;
@@ -1758,6 +2004,7 @@ class MatrixView extends ItemView {
     }
 
     const side = hero.createDiv('pm-hero-side');
+    this.buildZone(side);
     const nav = side.createDiv('pm-seg');
     const prevD = day.clone().subtract(1, 'day');
     const nextD = day.clone().add(1, 'day');
@@ -1794,10 +2041,36 @@ class MatrixView extends ItemView {
     textBtn(acts, '新建下一期', '', 'plus').onclick = () => this.plugin.openNewPeriodModal();
   }
 
+  buildZone(side) {
+    const box = side.createDiv('pm-zone');
+    const seg = box.createDiv({ cls: 'pm-seg', attr: { role: 'group', 'aria-label': '时区' } });
+    const { zone, usZone } = this.settings;
+    const date = new Date();
+    for (const z of ZONES) {
+      const tz = zoneTz(z.key, usZone);
+      const on = z.key === zone;
+      const b = seg.createEl('button', {
+        cls: 'pm-zone-btn' + (on ? ' is-on' : ''),
+        text: z.label,
+        attr: {
+          'aria-pressed': String(on),
+          'aria-label': `${z.label} ${momentIn(date, tz).format('HH:mm')} ${utcOffsetLabel(date, tz)}`,
+        },
+      });
+      if (!on) b.onclick = () => this.plugin.setZone(z.key);
+    }
+    this.clockEl = box.createSpan({ cls: 'pm-zone-clock', text: zoneNow().format('HH:mm') });
+    if (zone === 'us') {
+      const u = US_ZONES.find(x => x[0] === usZone);
+      box.createSpan({ cls: 'pm-zone-sub', text: u ? u[1] : '' });
+    }
+    if (!zone) box.createSpan({ cls: 'pm-zone-sub', text: '系统时间' });
+  }
+
   goDay(d) {
     const p = this.plugin.periodFor(d);
     if (!p) return;
-    if (d.isSame(moment(), 'day')) {
+    if (d.isSame(zoneNow(), 'day')) {
       this.follow = true;
       this.selectedPath = null;
       this.dayDate = null;
@@ -1845,6 +2118,22 @@ class MatrixView extends ItemView {
       }
       iconBtn(acts, 'trash-2', '删除', 'is-danger').onclick = () => this.remove(this.dayScope(), i.task);
     }
+  }
+
+  // 切时区后到了新的一天：没做完的任务先留在原处，由用户决定要不要顺延
+  buildCarryHold(el, items, today) {
+    const box = el.createDiv('pm-carry');
+    const head = box.createDiv('pm-carry-head');
+    setIcon(head.createSpan('pm-carry-icon'), 'history');
+    const txt = head.createDiv('pm-carry-text');
+    txt.createSpan({ cls: 'pm-carry-title', text: `换时区后到了 ${today.month() + 1}/${today.date()}，之前还有 ${items.length} 项没做完` });
+    txt.createSpan({ cls: 'pm-carry-sub', text: items.slice(0, 3).map(i => i.info.text).join('、') + (items.length > 3 ? ' …' : '') });
+    head.createDiv('pm-spacer');
+    textBtn(head, '先不', 'is-ghost').onclick = () => {
+      this.holdSkipped = today.format('YYYY-MM-DD');
+      this.refresh();
+    };
+    textBtn(head, '顺延到今天', 'is-primary').onclick = () => this.plugin.releaseCarry();
   }
 
   // ----- 周期任务 -----
@@ -2068,26 +2357,45 @@ class MatrixView extends ItemView {
     tools.createDiv('pm-spacer');
     const send = iconBtn(tools, 'arrow-up', '添加', 'pm-send');
 
+    // 写入和重新渲染之间输入框里还留着旧文字，快速连按回车会加出重复的任务，
+    // 所以提交时先清空输入框，并且同一时间只处理一次提交
+    let sending = false;
     const submit = async () => {
       const text = input.value.trim();
-      if (!text) return;
-      let parent = '';
-      const pt = this.periodTasks.find(p => p.raw === psel.value);
-      if (pt) {
-        parent = await this.plugin.ensurePeriodId(this.file, pt);
-        if (!parent) return;
-        this.lastParent = formatTask(Object.assign({}, pt, { id: parent }));
-      }
+      if (!text || sending) return;
+      sending = true;
+      input.value = '';
       this.draft = '';
-      this.focusInput = true;
-      await this.plugin.addDayTask(this.file, this.day.date(), Object.assign({
-        text,
-        done: false,
-        parent,
-      }, endPos(this.dayTasks, +this.lastQuad)));
+      const restore = () => {
+        if (!input.value) input.value = text;
+        this.draft = input.value;
+      };
+      try {
+        let parent = '';
+        const pt = this.periodTasks.find(p => p.raw === psel.value);
+        if (pt) {
+          parent = await this.plugin.ensurePeriodId(this.file, pt);
+          if (!parent) {
+            restore();
+            return;
+          }
+          this.lastParent = formatTask(Object.assign({}, pt, { id: parent }));
+        }
+        this.focusInput = true;
+        await this.plugin.addDayTask(this.file, this.day.date(), Object.assign({
+          text,
+          done: false,
+          parent,
+        }, endPos(this.dayTasks, +this.lastQuad)));
+      } catch (e) {
+        restore();
+        throw e;
+      } finally {
+        sending = false;
+      }
     };
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.isComposing) submit();
+      if (isSubmitKey(e)) submit();
     });
     send.onclick = submit;
 
@@ -2382,7 +2690,7 @@ class MatrixView extends ItemView {
     const n = this.dayTasks.filter(t => t.slot).length;
     head.createSpan({ cls: 'pm-count', text: n ? `${n} 项` : '点击时段添加' });
     const isToday = this.day.isSame(today, 'day');
-    const hour = moment().hour();
+    const hour = zoneHour();
     const list = tl.createDiv('pm-slots');
     for (const slot of this.settings.slots) {
       const s = list.createDiv({ cls: 'pm-slot', attr: { 'data-slot': slot } });
@@ -2636,36 +2944,49 @@ class MatrixView extends ItemView {
       }
     };
 
-    const onUp = async () => {
+    // pointercancel（系统接管了手势）和 Esc 都算取消，不能当成在最后经过的位置放下
+    const onUp = async ev => {
       doc.removeEventListener('pointermove', onMove);
       doc.removeEventListener('pointerup', onUp);
       doc.removeEventListener('pointercancel', onUp);
+      doc.removeEventListener('keydown', onKey, true);
       if (!moved) return;
       this.justDragged = true;
       window.setTimeout(() => { this.justDragged = false; }, 50);
+      const cancelled = ev.type !== 'pointerup';
       const slot = overSlot;
       const quad = overQuad;
       cleanup();
       this.dragging = false;
 
-      if (src.kind === 'period') {
-        if (quad) this.splitToDay(src.task, +quad.dataset.q);
-        return;
-      }
-      if (slot) {
+      if (!cancelled && src.kind === 'period' && quad) {
+        this.splitToDay(src.task, +quad.dataset.q);
+      } else if (!cancelled && src.kind === 'day' && slot) {
         await this.plugin.updateTask(this.file, this.dayScope(), src.task, { slot: slot.dataset.slot });
         return;
-      }
-      if (quad) {
+      } else if (!cancelled && src.kind === 'day' && quad) {
         const q = +quad.dataset.q;
         const patches = reorderPatches(this.visibleIn(q), src.task, q, dropIndex);
-        await this.plugin.updateMany(this.file, this.dayScope(), patches);
+        if (patches.length) {
+          await this.plugin.updateMany(this.file, this.dayScope(), patches);
+          return;
+        }
       }
+      // 没有写文件：拖动期间跳过的刷新请求在这里补一次，免得视图停在旧内容上
+      this.requestRefresh();
+    };
+
+    const onKey = ev => {
+      if (ev.key !== 'Escape' || !moved) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      onUp(ev);
     };
 
     doc.addEventListener('pointermove', onMove);
     doc.addEventListener('pointerup', onUp);
     doc.addEventListener('pointercancel', onUp);
+    doc.addEventListener('keydown', onKey, true);
   }
 }
 
@@ -2694,7 +3015,9 @@ class SkinModal extends Modal {
   footer(okText, onOk) {
     const f = this.contentEl.createDiv('pm-modal-foot');
     textBtn(f, '取消', 'is-ghost').onclick = () => this.close();
-    textBtn(f, okText, 'is-primary').onclick = onOk;
+    const ok = textBtn(f, okText, 'is-primary');
+    ok.onclick = onOk;
+    return ok;
   }
 
   onClose() {
@@ -2736,7 +3059,7 @@ class TaskModal extends SkinModal {
     ti.placeholder = '要做什么';
     ti.oninput = () => { this.values.text = ti.value; };
     ti.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.isComposing && !e.metaKey && !e.ctrlKey) this.save();
+      if (isSubmitKey(e) && !e.metaKey && !e.ctrlKey) this.save();
     });
     window.setTimeout(() => ti.focus(), 0);
 
@@ -2827,7 +3150,7 @@ class PromptModal extends SkinModal {
     const input = this.field('任务').createEl('input', { type: 'text', cls: 'pm-input is-lg' });
     input.value = this.value;
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.isComposing) this.submit(input.value);
+      if (isSubmitKey(e)) this.submit(input.value);
     });
     window.setTimeout(() => {
       input.focus();
@@ -2857,7 +3180,7 @@ class SlotModal extends SkinModal {
     const input = this.field('新任务').createEl('input', { type: 'text', cls: 'pm-input is-lg' });
     input.placeholder = '输入后回车';
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.isComposing) this.submit(input.value);
+      if (isSubmitKey(e)) this.submit(input.value);
     });
     window.setTimeout(() => input.focus(), 0);
 
@@ -2922,7 +3245,7 @@ class HabitModal extends SkinModal {
       inp.placeholder = '例如：🏃 健身 30 分钟';
       inp.oninput = () => { this.list[i] = inp.value; };
       inp.addEventListener('keydown', e => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        if (isSubmitKey(e)) {
           this.list.splice(i + 1, 0, '');
           this.draw(i + 1);
         }
@@ -2972,12 +3295,15 @@ class NewPeriodModal extends SkinModal {
   onOpen() {
     this.skin('新建时段笔记', '一期通常是 10 天左右，开始和结束要在同一个月。');
     const preview = createDiv('pm-preview');
+    // 日期有问题（跨月、结束早于开始、和已有的期重叠）时直接在预览里说明，不用等点了「创建」才提示
     const updatePreview = () => {
       const s = moment(this.start, 'YYYY-MM-DD', true);
       const e = moment(this.end, 'YYYY-MM-DD', true);
-      preview.setText(s.isValid() && e.isValid()
-        ? `将创建 ${s.year()}/${pad(s.month() + 1)}/${s.date()}-${e.date()}.md，共 ${e.diff(s, 'days') + 1} 天`
-        : '请选择日期');
+      const problem = periodProblem(s, e, this.plugin.periods());
+      preview.toggleClass('is-warn', !!problem);
+      preview.setText(problem
+        || `将创建 ${s.year()}/${pad(s.month() + 1)}/${s.date()}-${e.date()}.md，共 ${e.diff(s, 'days') + 1} 天`);
+      if (this.okBtn) this.okBtn.disabled = !!problem;
     };
     const endQuick = () => {
       const s = moment(this.start, 'YYYY-MM-DD');
@@ -2988,13 +3314,13 @@ class NewPeriodModal extends SkinModal {
 
     buildDatePicker(this.field('开始日期'), {
       value: this.start,
-      quick: [['今天', moment().startOf('day')]],
+      quick: [['今天', zoneNow().startOf('day')]],
       clearable: false,
       noCountdown: true,
       onChange: v => {
         if (!v) return;
         this.start = v;
-        this.end = defaultEnd(moment(v, 'YYYY-MM-DD')).format('YYYY-MM-DD');
+        this.end = periodEndFor(moment(v, 'YYYY-MM-DD'), this.plugin.periods()).format('YYYY-MM-DD');
         drawEnd();
         updatePreview();
       },
@@ -3025,18 +3351,26 @@ class NewPeriodModal extends SkinModal {
     mig.createDiv({ cls: 'pm-modal-note', text: '没做完的每日任务不用迁移，会在当天自动顺延。' });
 
     this.contentEl.appendChild(preview);
+    this.okBtn = this.footer('创建', () => this.create());
     updatePreview();
-    this.footer('创建', () => this.create());
   }
 
   async create() {
+    if (this.creating) return;
     const s = moment(this.start, 'YYYY-MM-DD', true);
     const e = moment(this.end, 'YYYY-MM-DD', true);
     if (!s.isValid() || !e.isValid()) {
       new Notice('日期格式不对');
       return;
     }
-    const file = await this.plugin.createPeriod(s, e, this.migrate);
+    // 连点两次「创建」不能建出两份（第二次会因为文件已存在而报错）
+    this.creating = true;
+    let file = null;
+    try {
+      file = await this.plugin.createPeriod(s, e, this.migrate);
+    } finally {
+      this.creating = false;
+    }
     if (!file) return;
     this.close();
     this.plugin.refreshViews();
@@ -3066,6 +3400,13 @@ class MatrixSettingTab extends PluginSettingTab {
           s.theme = v;
           await this.plugin.saveSettings();
         }));
+    new Setting(containerEl)
+      .setName('美国时区')
+      .setDesc('顶部选「美国」时用哪个时区。香港和巴黎在顶部直接切换。')
+      .addDropdown(dd => {
+        for (const [tz, , label] of US_ZONES) dd.addOption(tz, label);
+        dd.setValue(s.usZone).onChange(v => this.plugin.setZone(s.zone, v));
+      });
     new Setting(containerEl)
       .setName('界面字号')
       .addDropdown(dd => dd
@@ -3150,4 +3491,18 @@ module.exports._test = {
   countChildren,
   readNote,
   noteLines,
+  collectCarry,
+  markCarried,
+  isSubmitKey,
+  periodProblem,
+  suggestPeriod,
+  periodEndFor,
+  fillTemplate,
+  daysUntil,
+  countdown,
+  zoneParts,
+  momentIn,
+  zoneTz,
+  guessZone,
+  utcOffsetLabel,
 };

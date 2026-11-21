@@ -475,6 +475,20 @@
   position: relative;
   flex: 1;
   height: 0.3em;
+}
+
+/* 上下留出余量，进度条的发光不会被遮罩裁掉 */
+.pm-skin .pm-pprog-rail {
+  position: absolute;
+  inset: -0.8em 0;
+  box-sizing: border-box;
+  padding: 0.8em 0;
+  -webkit-mask: radial-gradient(circle at var(--pm-moon-x, -10%) 50%, transparent 0.82em, #000 0.86em);
+  mask: radial-gradient(circle at var(--pm-moon-x, -10%) 50%, transparent 0.82em, #000 0.86em);
+}
+
+.pm-skin .pm-pprog-line {
+  height: 100%;
   border-radius: 999px;
   background: var(--pm-sunken);
 }
@@ -485,15 +499,56 @@
   background: var(--pm-accent);
 }
 
+/* 当前查看的日期：一弯发光的月亮 */
 .pm-skin .pm-pprog-mark {
+  --pm-moon-a: #fffdf0;
+  --pm-moon-b: #ffe9a8;
+  --pm-moon-c: #ffcf66;
+  --pm-moon-glow: 255, 222, 130;
   position: absolute;
   top: 50%;
-  width: 0.85em;
-  height: 0.85em;
-  border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
-  transform: translate(-50%, -50%);
+  width: 1.5em;
+  height: 1.5em;
+  transform: translate(-50%, -50%) rotate(-12deg);
+  filter: drop-shadow(0 0 2px rgba(var(--pm-moon-glow), 0.95)) drop-shadow(0 0 7px rgba(var(--pm-moon-glow), 0.65));
+  pointer-events: none;
+}
+
+.pm-skin.pm-light .pm-pprog-mark {
+  --pm-moon-a: #ffe28a;
+  --pm-moon-b: #ffc23d;
+  --pm-moon-c: #f59a0c;
+  --pm-moon-glow: 255, 176, 40;
+}
+
+.pm-skin .pm-pprog-mark::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 26% 62%, var(--pm-moon-a), var(--pm-moon-b) 52%, var(--pm-moon-c));
+  -webkit-mask: radial-gradient(circle 0.6em at 70% 36%, transparent 97%, #000 100%);
+  mask: radial-gradient(circle 0.6em at 70% 36%, transparent 97%, #000 100%);
+}
+
+.pm-skin .pm-pprog-mark::after {
+  content: '';
+  position: absolute;
+  inset: -55%;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(var(--pm-moon-glow), 0.38), rgba(var(--pm-moon-glow), 0.1) 45%, transparent 70%);
+}
+
+.pm-skin.pm-fx .pm-pprog-mark::after { animation: pm-moon-breathe 3.8s ease-in-out infinite; }
+
+@keyframes pm-moon-breathe {
+  0%, 100% { opacity: 0.6; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-skin .pm-pprog-mark::after { animation: none !important; }
 }
 
 .pm-skin .pm-pprog-text {
@@ -507,6 +562,53 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 0.6em;
+}
+
+/* 时区 */
+.pm-skin .pm-zone {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+.pm-skin .pm-seg button.pm-zone-btn {
+  height: 1.9em;
+  padding: 0 0.85em;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--pm-text-2);
+  font-size: 0.84em;
+  font-weight: 500;
+}
+
+.pm-skin .pm-seg button.pm-zone-btn:hover:not(.is-on) { color: var(--pm-text); }
+
+.pm-skin .pm-seg button.pm-zone-btn.is-on {
+  background: var(--pm-surface-2);
+  color: var(--pm-text);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  cursor: default;
+}
+
+.pm-skin.pm-dark .pm-seg button.pm-zone-btn.is-on { background: rgba(255, 255, 255, 0.17); }
+
+.pm-skin.pm-light .pm-seg button.pm-zone-btn.is-on,
+.pm-skin.pm-space.pm-light .pm-seg button.pm-zone-btn.is-on { background: rgba(255, 255, 255, 0.92); }
+
+.pm-skin .pm-zone-clock {
+  font-size: 0.92em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--pm-text);
+}
+
+.pm-skin .pm-zone-sub {
+  margin-left: -0.15em;
+  font-size: 0.76em;
+  color: var(--pm-text-3);
 }
 
 /* 分段控件 */
@@ -1787,6 +1889,11 @@
   color: var(--pm-text-2);
 }
 
+.pm-modal .pm-preview.is-warn {
+  background: color-mix(in srgb, var(--pm-red) 12%, transparent);
+  color: var(--pm-red);
+}
+
 .pm-modal .pm-input { background: var(--pm-surface); }
 .pm-modal select.pm-select { background-color: var(--pm-surface); height: 2.5em; border-radius: var(--pm-radius-sm); }
 
@@ -2791,7 +2898,6 @@
 }
 
 .pm-skin.pm-space.pm-dark .pm-pprog-fill { box-shadow: 0 0 8px rgba(140, 130, 255, 0.6); }
-.pm-skin.pm-space.pm-dark .pm-pprog-mark { box-shadow: 0 0 8px 2px rgba(200, 205, 255, 0.7); }
 
 .pm-skin.pm-space.pm-dark .pm-badge { box-shadow: 0 0 10px rgba(125, 140, 255, 0.55); }
 
