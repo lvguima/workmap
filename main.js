@@ -13,6 +13,7 @@ const {
   TFile,
   moment,
   setIcon,
+  requestUrl,
 } = require('obsidian');
 
 // ---------- 常量 ----------
@@ -24,9 +25,12 @@ const PERIOD_HEAD_RE = /^##\s+(周期任务|四象限)\s*$/;
 const DAY_HEAD_RE = /^##\s+(\d{1,2})\s*$/;
 const H12_RE = /^#{1,2}\s/;
 const HR_RE = /^---\s*$/;
-const TASK_RE = /^- \[([ xX])\] ?(.*)$/;
+// [ ] 未开始、[/] 进行中、[x] 完成、[-] 已取消。[>] 是已顺延，不算任务
+const TASK_RE = /^- \[([ xX/-])\] ?(.*)$/;
 const EMPTY_TASK_RE = /^- \[ \]\s*$/;
-const META_RE = /\s*%%(m|p|t|id):([^%\n]*)%%/g;
+const META_RE = /\s*%%(m|p|t|id|c):([^%\n]*)%%/g;
+const NOTES_HEAD_RE = /^##\s+本期笔记\s*$/;
+const NOTE_LINK_RE = /^- \[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/;
 const DUE_RE = /\s*📅\s*(\d{4}-\d{2}-\d{2})/;
 const STAR_RE = /\s*(★{1,3})(?=\s|$)/;
 const HABIT_RE = /^习惯[：:]\s*(.*)$/;
@@ -36,7 +40,6 @@ const SIZES = { s: 14, m: 16, l: 18, xl: 20 };
 
 const DEFAULT_SETTINGS = {
   hideDone: false,
-  habits: ['REVIEW', 'workoUT', 'MeD+MilK', 'book&KK', 'code&write'],
   slots: ['07-09', '09-11', '11-12', '14-16', '16-18', '20-22', '22-24'],
   theme: 'auto',
   size: 'm',
@@ -45,7 +48,27 @@ const DEFAULT_SETTINGS = {
   fx: true,
   sky: true,
   carryHold: '',
+  carryMode: 'mark',        // 顺延后原来那行：mark 改成 [>]，move 直接删掉
+  carryStart: '',           // 顺延起点 YYYY-MM-DD：早于这天的任务不顺延。空 = 只看上一期
+  aiKey: '',
+  aiBase: 'https://www.dmxapi.cn/v1',
+  aiModel: 'claude-sonnet-5-5',
+  agentModel: 'claude-sonnet-5-5',
+  agentEffort: 'medium',
+  agentCtx: { today: true, yesterday: true, period: true, notes: false },
+  brief: null,              // 今日简报缓存：{ date, at, model, text, usage }
 };
+
+// DMXAPI 上常用的对话模型，设置里也可以填别的
+const AI_MODELS = [
+  ['claude-sonnet-5-5', 'Claude Sonnet 5.5（推荐）'],
+  ['claude-opus-5-5', 'Claude Opus 5.5（更强，更贵）'],
+  ['claude-haiku-5-5', 'Claude Haiku 5.5（快、便宜）'],
+  ['gpt-5.5', 'GPT-5.5'],
+  ['gemini-3.5-flash', 'Gemini 3.5 Flash'],
+  ['deepseek-v4-pro', 'DeepSeek V4 Pro'],
+  ['qwen3.8-max', 'Qwen 3.8 Max'],
+];
 
 // 时区：key 存在设置里。美国有多个时区，具体用哪个由 usZone 决定
 const ZONES = [
@@ -87,7 +110,7 @@ try {
   const { ViewPlugin, Decoration, MatchDecorator } = require('@codemirror/view');
   const { editorLivePreviewField } = require('obsidian');
   const metaDecorator = new MatchDecorator({
-    regexp: /\s?%%(?:m|p|t|id):[^%\n]*%%/g,
+    regexp: /\s?%%(?:m|p|t|id|c):[^%\n]*%%/g,
     decoration: Decoration.replace({}),
   });
   const isLive = state => !!state.field(editorLivePreviewField, false);
@@ -282,10 +305,13 @@ function parseTaskLine(line, i) {
       y = clamp(b, 0, 100);
     }
   }
+  const mark = m[1].toLowerCase();
   return {
     line: i,
     raw: line,
-    done: m[1] !== ' ',
+    done: mark === 'x' || mark === '-',
+    cancelled: mark === '-',
+    doing: mark === '/',
     text: body,
     level,
     due,
@@ -294,6 +320,7 @@ function parseTaskLine(line, i) {
     id: meta.id || '',
     parent: meta.p || '',
     slot: meta.t || '',
+    since: /^\d{4}-\d{2}-\d{2}$/.test(meta.c || '') ? meta.c : '',
   };
 }
 
@@ -314,13 +341,19 @@ function collectTasks(lines, range, kind) {
   return tasks;
 }
 
+function taskMark(t) {
+  if (t.done) return t.cancelled ? '-' : 'x';
+  return t.doing ? '/' : ' ';
+}
+
 function formatTask(t) {
-  let s = `- [${t.done ? 'x' : ' '}] ${t.text}`;
+  let s = `- [${taskMark(t)}] ${t.text}`;
   if (t.level) s += ' ' + '★'.repeat(clamp(t.level, 1, 3));
   if (t.due) s += ` 📅 ${t.due}`;
   if (t.id) s += ` %%id:${t.id}%%`;
   if (t.parent) s += ` %%p:${t.parent}%%`;
   if (t.slot) s += ` %%t:${t.slot}%%`;
+  if (t.since) s += ` %%c:${t.since}%%`;
   if (t.x != null && t.y != null) s += ` %%m:${Math.round(t.x)},${Math.round(t.y)}%%`;
   return s;
 }
@@ -336,28 +369,26 @@ function findRaw(lines, range, raw) {
   return -1;
 }
 
-function parseHabits(line) {
-  const m = HABIT_RE.exec(line);
-  const done = new Set();
-  if (!m) return done;
-  const re = /([✅⬜])([^✅⬜]*)/g;
-  let x;
-  while ((x = re.exec(m[1]))) {
-    const name = x[2].trim();
-    if (name && x[1] === '✅') done.add(name);
+// 拖动排序：把 srcRaw 那一块（任务行和备注）挪到 beforeRaw 那一块前面；beforeRaw 为空就挪到最后一个任务后面。
+// 找不到行返回 false（笔记在渲染之后被改过）
+function moveTaskBlock(lines, range, srcRaw, beforeRaw) {
+  const si = findRaw(lines, range, srcRaw);
+  if (si < 0 || srcRaw === beforeRaw) return false;
+  const n = 1 + countChildren(lines, si, range.end);
+  const block = lines.splice(si, n);
+  const r = { start: range.start, end: range.end - n };
+  let at = -1;
+  if (beforeRaw) {
+    at = findRaw(lines, r, beforeRaw);
+    if (at < 0) return false;
+  } else {
+    for (let i = r.start + 1; i < r.end; i++) {
+      if (TASK_RE.test(lines[i])) at = i + 1 + countChildren(lines, i, r.end);
+    }
+    if (at < 0) at = r.start + 1;
   }
-  return done;
-}
-
-function formatHabits(habits, done) {
-  return '习惯：' + habits.map(h => (done.has(h) ? '✅' : '⬜') + h).join(' ');
-}
-
-function habitLineIndex(lines, range) {
-  for (let i = range.start + 1; i < range.end; i++) {
-    if (HABIT_RE.test(lines[i])) return i;
-  }
-  return -1;
+  lines.splice(at, 0, ...block);
+  return true;
 }
 
 function ensureDay(lines, day) {
@@ -398,33 +429,629 @@ function insertTaskBlock(lines, range, block) {
   lines.splice(at, 0, ...ins);
 }
 
+const CARRIED_RE = /^- \[>\] ?(.*)$/;
+
+function dayDate(p, day) {
+  if (day < 1 || day > p.startDate.daysInMonth()) return null;
+  return p.startDate.clone().date(day);
+}
+
+// 老的顺延任务没有 %%c%%：从 day 往前逐个小节找同名的 [>]，连续找到的最早那天就是最初安排的日子。
+// 中间断开就停，免得把很久以前同名的另一件事算进来。找不到返回 ''
+function chainOrigin(lines, p, text, day) {
+  const days = listDays(lines).filter(d => d.day < day).sort((a, b) => b.day - a.day);
+  let origin = '';
+  for (const d of days) {
+    let hit = null;
+    for (let i = d.start + 1; i < d.end && !hit; i++) {
+      const m = CARRIED_RE.exec(lines[i]);
+      if (!m) continue;
+      const t = parseTaskLine('- [ ] ' + m[1], i);
+      if (t && t.text === text) hit = t;
+    }
+    if (!hit) break;
+    if (hit.since) return hit.since;
+    const date = dayDate(p, d.day);
+    if (!date) break;
+    origin = date.format('YYYY-MM-DD');
+  }
+  return origin;
+}
+
 // 自动顺延：找出某一期里早于 today 的未完成每日任务（任务行连同备注）。
 // line 是任务行在 lines 里的位置，markCarried 要在同一份 lines 上用它。
-function collectCarry(lines, p, today) {
+// 顺延出去的块带上 %%c:最初安排的日期%%，这样能算出一件事拖了几天。
+// from：顺延起点（moment），早于它的日子不管
+function collectCarry(lines, p, today, from) {
   const out = [];
   for (const d of listDays(lines)) {
-    if (d.day > p.startDate.daysInMonth()) continue;
-    const date = p.startDate.clone().date(d.day);
-    if (!date.isBefore(today, 'day')) continue;
+    const date = dayDate(p, d.day);
+    if (!date || !date.isBefore(today, 'day')) continue;
+    if (from && date.isBefore(from, 'day')) continue;
     for (let i = d.start + 1; i < d.end; i++) {
       const t = parseTaskLine(lines[i], i);
       if (!t || t.done || !t.text) continue;
       const kids = countChildren(lines, i, d.end);
-      const block = [formatTask(Object.assign({}, t, { slot: '' })), ...lines.slice(i + 1, i + 1 + kids)];
+      const since = t.since || chainOrigin(lines, p, t.text, d.day) || date.format('YYYY-MM-DD');
+      const block = [formatTask(Object.assign({}, t, { slot: '', since })), ...lines.slice(i + 1, i + 1 + kids)];
       out.push({
         line: i,
+        kids,
+        day: d.day,
         raw: lines[i],
+        orig: lines.slice(i, i + 1 + kids),
         block,
-        info: { raw: block[0], text: t.text, from: `${p.month}/${d.day}` },
+        info: { raw: block[0], text: t.text, from: `${p.month}/${d.day}`, since },
       });
     }
   }
   return out;
 }
 
-function markCarried(lines, items) {
-  for (const it of items) lines[it.line] = lines[it.line].replace(/^- \[ \]/, '- [>]');
+// mode = 'mark'：原行改成 [>]，留下每天的记录；'move'：原行连同备注直接删掉
+function markCarried(lines, items, mode) {
+  if (mode === 'move') {
+    for (const it of [...items].sort((a, b) => b.line - a.line)) lines.splice(it.line, 1 + it.kids);
+    return;
+  }
+  for (const it of items) {
+    lines[it.line] = lines[it.line].replace(/^- \[[ /]\]/, '- [>]');
+    it.marked = lines[it.line];
+  }
 }
+
+// 顺延失败时把上一期改过的地方还原
+function unmarkCarried(lines, items, mode) {
+  if (mode === 'move') {
+    for (const it of items) insertTaskBlock(lines, ensureDay(lines, it.day), it.orig);
+    return;
+  }
+  for (const it of items) {
+    const idx = lines.indexOf(it.marked);
+    if (idx >= 0) lines[idx] = it.raw;
+  }
+}
+
+// 拖了几天：从最初安排的那天到 day
+function carryAge(since, day) {
+  const d = parseDate(since);
+  return d ? day.clone().startOf('day').diff(d, 'days') : 0;
+}
+
+// ---------- 本期笔记 ----------
+// 学习笔记、会议记录这类长内容单独存成文件，放在「年/月/起-止/」文件夹里；
+// 时段笔记里只留一个「## 本期笔记」小节，每行一个链接。这样笔记里的标题和 --- 不会打乱时段笔记的结构。
+
+function notesRange(lines) {
+  const start = lines.findIndex(l => NOTES_HEAD_RE.test(l));
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (H12_RE.test(lines[i]) || HR_RE.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return { start, end };
+}
+
+function listNoteLinks(lines) {
+  const r = notesRange(lines);
+  if (!r) return [];
+  const out = [];
+  for (let i = r.start + 1; i < r.end; i++) {
+    const m = NOTE_LINK_RE.exec(lines[i]);
+    if (m) out.push({ line: i, raw: lines[i], link: m[1].trim(), title: (m[2] || '').trim() });
+  }
+  return out;
+}
+
+// 没有这一节时，加在周期任务后面（分隔线 --- 之前）
+function ensureNotesSection(lines) {
+  const exist = notesRange(lines);
+  if (exist) return exist;
+  const pr = periodRange(lines);
+  if (!pr) {
+    lines.unshift('## 本期笔记', '');
+    return notesRange(lines);
+  }
+  let at = pr.end;
+  while (at > pr.start + 1 && lines[at - 1].trim() === '') at--;
+  lines.splice(at, 0, '', '## 本期笔记');
+  return notesRange(lines);
+}
+
+function noteLinkLine(path, title) {
+  return `- [[${path.replace(/\.md$/, '')}|${title.replace(/[|\]]/g, ' ').trim()}]]`;
+}
+
+function addNoteLink(lines, linkLine) {
+  const r = ensureNotesSection(lines);
+  let at = r.start;
+  for (let i = r.start + 1; i < r.end; i++) {
+    if (lines[i].trim()) at = i;
+  }
+  lines.splice(at + 1, 0, ...(at === r.start ? ['', linkLine] : [linkLine]));
+}
+
+// 不属于任何小节的正文：在周期任务、本期笔记、各天小节以外，又不是空行或 --- 的内容
+// （周期任务前面的前言不算）。通常是直接粘贴进来的学习笔记。
+// 返回 [{ start, end }]，end 不含，首尾的空行和 --- 已去掉，中间的 --- 保留
+function strayBlocks(lines) {
+  const pr = periodRange(lines);
+  if (!pr) return [];
+  const covered = new Uint8Array(lines.length);
+  const cover = r => {
+    if (r) for (let i = r.start; i < r.end; i++) covered[i] = 1;
+  };
+  cover({ start: 0, end: pr.end });
+  cover(notesRange(lines));
+  for (const d of listDays(lines)) cover(d);
+  const blank = l => !l.trim() || HR_RE.test(l);
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (covered[i] || blank(lines[i])) {
+      i++;
+      continue;
+    }
+    let j = i;
+    let last = i;
+    while (j < lines.length && !covered[j]) {
+      if (!blank(lines[j])) last = j;
+      j++;
+    }
+    blocks.push({ start: i, end: last + 1 });
+    i = j;
+  }
+  return blocks;
+}
+
+function safeFileName(s) {
+  const name = (s || '')
+    .replace(/[*_`~]/g, '')
+    .replace(/[\\/:?"<>|#^[\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+    .trim();
+  return name || '未命名笔记';
+}
+
+// 一段内容的标题：第一个 Markdown 标题，没有就取第一行的前 30 个字
+function strayTitle(blockLines) {
+  for (const l of blockLines) {
+    const m = /^#{1,6}\s+(.+)$/.exec(l);
+    if (m) return safeFileName(m[1]);
+  }
+  const first = blockLines.find(l => l.trim()) || '';
+  return safeFileName(first.replace(/^[-*>\s]+/, '').slice(0, 30));
+}
+
+// 把所有游离内容从时段笔记里拿出来。返回 [{ title, text }]；lines 原地修改
+function takeStray(lines) {
+  const blocks = strayBlocks(lines);
+  const out = blocks.map(b => {
+    const ls = lines.slice(b.start, b.end);
+    return { title: strayTitle(ls), text: ls.join('\n') + '\n' };
+  });
+  for (const b of [...blocks].reverse()) {
+    lines.splice(b.start, b.end - b.start);
+    // 拿掉后两边留下的连续空行合并成一个
+    let a = b.start;
+    while (a > 0 && !lines[a - 1].trim()) a--;
+    let z = b.start;
+    while (z < lines.length && !lines[z].trim()) z++;
+    if (z - a > 1) lines.splice(a + 1, z - a - 1);
+  }
+  return out;
+}
+
+// ---------- 大模型回顾 ----------
+
+function statusText(t) {
+  if (t.cancelled) return '已取消';
+  if (t.done) return '已完成';
+  if (t.doing) return '进行中';
+  return '未完成';
+}
+
+// 把一期笔记整理成给大模型看的纯文本：去掉 %%…%% 元数据，写清楚状态、象限、拖了几天
+function periodTaskLines(pts, daily) {
+  const out = [];
+  for (const t of pts) {
+    const linked = t.id ? daily.filter(d => d.parent === t.id && !d.cancelled) : [];
+    let line = `- [${statusText(t)}] ${t.text}`;
+    if (t.level) line += ` · 重要程度：${LEVEL_NAMES[t.level]}`;
+    if (t.due) line += ` · 截止 ${t.due}`;
+    line += ` · 拆出的每日任务完成 ${linked.filter(x => x.done).length}/${linked.length}`;
+    out.push(line);
+    if (t.note) out.push(...t.note.split('\n').map(l => '  ' + l));
+  }
+  return out;
+}
+
+// 某一天小节里的任务，一行一个：状态、主线、象限、时段、拖了几天，下面是备注
+function dayDigest(lines, p, d, parentName) {
+  const date = dayDate(p, d.day);
+  if (!date) return [];
+  const out = [];
+  for (const t of collectTasks(lines, d, 'day')) {
+    let line = `- [${statusText(t)}] ${t.text}`;
+    const pn = parentName(t.parent);
+    if (pn) line += ` ← 主线「${pn}」`;
+    if (t.x != null) line += ` · ${QUADS[quadOf(t)].name}`;
+    if (t.slot) line += ` · 时段 ${t.slot}`;
+    const since = t.since || chainOrigin(lines, p, t.text, d.day);
+    const age = since ? carryAge(since, date) : 0;
+    if (age > 0) line += t.done ? ` · 拖了 ${age} 天才完成` : ` · 最早安排在 ${since}，已拖 ${age} 天`;
+    out.push(line);
+    if (t.note) out.push(...t.note.split('\n').map(l => '  ' + l));
+  }
+  let moved = 0;
+  for (let i = d.start + 1; i < d.end; i++) if (CARRIED_RE.test(lines[i])) moved++;
+  if (moved) out.push(`- （另有 ${moved} 项当天没做完，顺延到了后面）`);
+  return out;
+}
+
+function parentNamer(pts) {
+  return id => {
+    const t = id && pts.find(x => x.id === id);
+    return t ? t.text : '';
+  };
+}
+
+function periodDigest(o) {
+  const { p, lines, today, notes } = o;
+  const out = [];
+  const total = p.endDate.date() - p.start + 1;
+  const nth = clamp(today.diff(p.startDate, 'days') + 1, 1, total);
+  out.push(`# 时段：${p.year} 年 ${p.month} 月 ${p.start}–${p.endDate.date()} 日（共 ${total} 天）`);
+  out.push(`今天是 ${today.format('YYYY-MM-DD')}，本期第 ${nth} 天。`);
+
+  const pr = periodRange(lines);
+  const pts = pr ? collectTasks(lines, pr, 'period') : [];
+  const days = listDays(lines).filter(d => dayDate(p, d.day)).sort((a, b) => a.day - b.day);
+  const daily = days.flatMap(d => collectTasks(lines, d, 'day').map(t => Object.assign(t, { day: d.day })));
+  const parentName = parentNamer(pts);
+
+  out.push('', '## 周期任务（这一期的主线）');
+  if (!pts.length) out.push('（没有）');
+  out.push(...periodTaskLines(pts, daily));
+
+  out.push('', '## 每天的任务');
+  for (const d of days) {
+    const ls = dayDigest(lines, p, d, parentName);
+    if (!ls.length) continue;
+    const date = dayDate(p, d.day);
+    out.push('', `### ${date.format('M/D')} 周${WEEK[date.day()]}`, ...ls);
+  }
+
+  if (notes && notes.length) {
+    out.push('', '## 本期笔记');
+    for (const n of notes) out.push('', `### 《${n.title}》`, '', n.text.trim());
+  }
+  return out.join('\n');
+}
+
+function httpErrorText(status, msg) {
+  const hint = {
+    401: '密钥无效',
+    403: '密钥被禁用或额度用完了',
+    404: '接口地址不对',
+    413: '内容太长',
+    429: '请求太频繁',
+    503: '这个模型现在不可用，检查模型名',
+  }[status];
+  return `HTTP ${status}${hint ? ` · ${hint}` : ''}${msg ? `：${msg}` : ''}`;
+}
+
+const AI_REVIEW_PROMPT = `你是我的个人复盘助手。下面是我这一期（大约 10 天）的时段笔记：周期任务是主线，每天的任务按艾森豪威尔四象限分类，「已拖 N 天」表示这件事被一天天顺延了多久，最后是这期记下的学习笔记。
+
+请用中文写一份复盘，直接输出 Markdown，不要开场白和客套话。结构：
+
+## 一句话总结
+## 主线进展
+逐条说每个周期任务推进到哪了、还差什么。没有拆出每日任务的主线要点出来。
+## 时间花在哪了
+各象限的分布、哪些天做得多、哪些天几乎空白，以及从中看出的节奏问题。
+## 拖延与卡点
+列出拖得最久的任务，分析可能的原因（任务太大、不清楚下一步、优先级不对……），每条给一个具体的拆法或下一步。
+## 这期学到了什么
+从本期笔记里提炼 3–6 个要点；没有笔记就跳过这一节。
+## 下一期建议
+3–5 条，具体到可以直接写成任务。
+
+要求：基于笔记里的事实说话，引用具体任务名；不要编造笔记里没有的内容；不夸奖、不鸡汤，像一位直率的同事。`;
+
+const AI_QUIZ_PROMPT = `你是我的学习教练。下面是我最近记的学习笔记。请根据内容出一套复习题，帮我检查是否真正理解，直接输出 Markdown，不要开场白。
+
+要求：
+- 出 8–12 道题，覆盖笔记里最重要的概念；由易到难：先是概念辨析，再是原理理解，最后 2–3 道结合实际场景的应用题。
+- 题型混合：简答、判断并说明理由、情景分析。不要出纯记忆的填空题。
+- 每道题的格式：
+
+### 第 N 题（概念 / 理解 / 应用）
+题目内容
+
+> [!note]- 参考答案
+> 答案要点，以及对应笔记里的哪部分
+
+- 最后加一节「## 容易混淆的地方」，列出 2–4 个笔记里容易弄错的点。
+- 只依据笔记内容出题和作答；笔记里没讲清楚的地方，在答案里注明「笔记未覆盖」。`;
+
+// ---------- 工作助理 ----------
+
+const AGENT_VIEW = 'workmap-agent';
+// api：anthropic 走 DMXAPI 的 /v1/messages（推理强度要这样传才生效），其他走 OpenAI 兼容的 /v1/chat/completions
+const AGENT_MODELS = [
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', api: 'anthropic' },
+  { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash', api: 'openai' },
+  { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen', api: 'openai' },
+];
+const EFFORTS = [['low', '低'], ['medium', '中'], ['high', '高']];
+const CHAT_DIR = '对话';
+const AGENT_CTX = [['today', '今天'], ['yesterday', '昨天'], ['period', '本期主线'], ['notes', '本期笔记']];
+
+function agentModel(id) {
+  return AGENT_MODELS.find(m => m.id === id) || { id, label: id, api: /^claude/.test(id) ? 'anthropic' : 'openai' };
+}
+
+function buildChatRequest(o) {
+  const { base, key, model, effort, system, messages, stream } = o;
+  const m = agentModel(model);
+  const b = (base || 'https://www.dmxapi.cn/v1').replace(/\/+$/, '');
+  if (m.api === 'anthropic') {
+    return {
+      url: `${b}/messages`,
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: { model: m.id, max_tokens: 16000, stream: !!stream, system, messages, thinking: { type: 'adaptive' }, output_config: { effort } },
+    };
+  }
+  const body = {
+    model: m.id,
+    max_tokens: 16000,
+    stream: !!stream,
+    reasoning_effort: effort,
+    messages: [{ role: 'system', content: system }, ...messages],
+  };
+  if (stream) body.stream_options = { include_usage: true };
+  return { url: `${b}/chat/completions`, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body };
+}
+
+// 流式输出：把收到的文本切成 SSE 的 data 事件。最后一行可能不完整，放回 rest 等下一块
+function sseSplit(buf) {
+  const parts = buf.split(/\r?\n/);
+  const rest = parts.pop();
+  const events = [];
+  for (const line of parts) {
+    if (!line.startsWith('data:')) continue;
+    const d = line.slice(5).trim();
+    if (!d || d === '[DONE]') continue;
+    try {
+      events.push(JSON.parse(d));
+    } catch (e) {
+      // 不是 JSON 的行（心跳之类）跳过
+    }
+  }
+  return { rest, events };
+}
+
+// 两种接口的流式事件统一成 { text, thinking, usage, error }
+function streamDelta(api, ev) {
+  const out = { text: '', thinking: '', usage: null, error: '' };
+  if (ev.error) {
+    out.error = (ev.error && ev.error.message) || JSON.stringify(ev.error);
+    return out;
+  }
+  if (api === 'anthropic') {
+    if (ev.type === 'content_block_delta' && ev.delta) {
+      if (ev.delta.type === 'text_delta') out.text = ev.delta.text || '';
+      if (ev.delta.type === 'thinking_delta') out.thinking = ev.delta.thinking || '';
+    } else if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+      out.usage = { input: ev.message.usage.input_tokens };
+    } else if (ev.type === 'message_delta' && ev.usage) {
+      out.usage = { input: ev.usage.input_tokens, output: ev.usage.output_tokens, cost: ev.usage.cost || '' };
+    }
+    return out;
+  }
+  const c = ev.choices && ev.choices[0];
+  if (c && c.delta) {
+    out.text = c.delta.content || '';
+    out.thinking = c.delta.reasoning_content || '';
+  }
+  if (ev.usage) out.usage = { input: ev.usage.prompt_tokens, output: ev.usage.completion_tokens };
+  return out;
+}
+
+// 不流式时的回复
+function replyOf(api, data) {
+  if (api === 'anthropic') {
+    const blocks = data.content || [];
+    return {
+      text: blocks.filter(b => b.type === 'text').map(b => b.text).join(''),
+      thinking: blocks.filter(b => b.type === 'thinking').map(b => b.thinking || '').join(''),
+      usage: data.usage ? { input: data.usage.input_tokens, output: data.usage.output_tokens, cost: data.usage.cost || '' } : null,
+    };
+  }
+  const m = (data.choices && data.choices[0] && data.choices[0].message) || {};
+  return {
+    text: m.content || '',
+    thinking: m.reasoning_content || '',
+    usage: data.usage ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens } : null,
+  };
+}
+
+// 助理建议的改动写在回复末尾的 ```workmap 代码块里（JSON 数组），由用户确认后执行
+const ACTION_RE = /```workmap[^\S\n]*\n([\s\S]*?)```/;
+const ACTION_OPS = ['add', 'done', 'doing', 'cancel', 'move', 'slot', 'addPeriod'];
+
+function parseActions(text) {
+  const m = ACTION_RE.exec(text || '');
+  if (!m) return { text: text || '', actions: [] };
+  let list = [];
+  try {
+    const v = JSON.parse(m[1]);
+    list = (Array.isArray(v) ? v : [v]).filter(a => a && ACTION_OPS.includes(a.op));
+  } catch (e) {
+    return { text, actions: [] };
+  }
+  return { text: (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim(), actions: list.slice(0, 12) };
+}
+
+// 流式输出时先不显示还没写完的操作块
+function visibleReply(text) {
+  const i = (text || '').indexOf('```workmap');
+  return i < 0 ? text || '' : text.slice(0, i).trimEnd();
+}
+
+function describeAction(a) {
+  const q = QUADS[a.quad] ? `「${QUADS[a.quad].title}」` : '';
+  switch (a.op) {
+    case 'add': return `新增今天的任务${q ? '到' + q : ''}：${a.text}${a.parent ? `（主线：${a.parent}）` : ''}`;
+    case 'done': return `标为完成：${a.task}`;
+    case 'doing': return `标为进行中：${a.task}`;
+    case 'cancel': return `标为已取消：${a.task}`;
+    case 'move': return `移到${q || '别的象限'}：${a.task}`;
+    case 'slot': return `排进 ${a.slot}：${a.task}`;
+    case 'addPeriod': return `新增本期主线：${a.text}${a.level ? ' ' + '★'.repeat(clamp(+a.level, 1, 3)) : ''}${a.due ? ` 📅 ${a.due}` : ''}`;
+    default: return a.op;
+  }
+}
+
+// 按名字找任务：先找完全一样的，再找唯一包含它的
+function matchTask(tasks, name) {
+  const n = (name || '').trim();
+  if (!n) return null;
+  const exact = tasks.filter(t => t.text === n);
+  if (exact.length) return exact.find(t => !t.done) || exact[0];
+  const part = tasks.filter(t => t.text.includes(n) || n.includes(t.text));
+  return part.length === 1 ? part[0] : null;
+}
+
+// 对话存成 md：每条消息一个「### 🧑 我」或「### 🤖 助理」小标题，操作块原样留在助理消息后面
+function formatChat(chat) {
+  const out = ['---', 'workmap: chat', `created: ${chat.created}`, '---', '', `# ${chat.title}`, ''];
+  for (const m of chat.messages) {
+    out.push(m.role === 'user' ? `### 🧑 我 · ${m.time}` : `### 🤖 助理 · ${m.model} · ${m.time}`, '');
+    let body = (m.content || '').trim();
+    if (m.actions && m.actions.length) body += '\n\n```workmap\n' + JSON.stringify(m.actions) + '\n```';
+    out.push(body, '');
+  }
+  return out.join('\n');
+}
+
+function parseChat(text) {
+  const fm = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  const created = fm && (/^created:\s*(.+)$/m.exec(fm[1]) || [])[1];
+  const body = fm ? text.slice(fm[0].length) : text;
+  const title = (/^# (.+)$/m.exec(body) || [])[1] || '对话';
+  const messages = [];
+  const re = /^### (🧑 我|🤖 助理) · (.+)$/gm;
+  const heads = [];
+  let m;
+  while ((m = re.exec(body))) heads.push({ at: m.index, end: m.index + m[0].length, who: m[1], meta: m[2] });
+  heads.forEach((h, i) => {
+    const raw = body.slice(h.end, i + 1 < heads.length ? heads[i + 1].at : body.length).trim();
+    if (h.who === '🧑 我') {
+      messages.push({ role: 'user', content: raw, time: h.meta.trim() });
+    } else {
+      const parts = h.meta.split(' · ');
+      const time = parts.pop().trim();
+      const { text: content, actions } = parseActions(raw);
+      messages.push({ role: 'assistant', content, actions, model: parts.join(' · ').trim(), time });
+    }
+  });
+  return { title: title.trim(), created: (created || '').trim(), messages };
+}
+
+function chatTitle(text) {
+  return safeFileName((text || '').trim().replace(/\s+/g, ' ').slice(0, 24)) || '对话';
+}
+
+// 给助理的上下文：现在的时间、本期主线、今天和昨天的任务、本期笔记，按开关取舍
+function agentContext(o) {
+  const { now, cur, prev, flags, notes } = o;
+  const out = [`现在：${now.format('YYYY-MM-DD')} 周${WEEK[now.day()]} ${now.format('HH:mm')}`];
+  if (!cur) {
+    out.push('今天还没有对应的时段笔记。');
+    return out.join('\n');
+  }
+  const { p, lines } = cur;
+  const total = p.endDate.date() - p.start + 1;
+  out.push(`本期：${p.year} 年 ${p.month} 月 ${p.start}–${p.endDate.date()} 日，第 ${clamp(now.diff(p.startDate, 'days') + 1, 1, total)} 天，共 ${total} 天`);
+  const pr = periodRange(lines);
+  const pts = pr ? collectTasks(lines, pr, 'period') : [];
+  const days = listDays(lines);
+  const daily = days.flatMap(d => collectTasks(lines, d, 'day'));
+  const name = parentNamer(pts);
+  if (flags.period) {
+    out.push('', '## 本期主线');
+    out.push(...(pts.length ? periodTaskLines(pts, daily) : ['（没有）']));
+  }
+  const section = (src, date, label) => {
+    const d = src && date ? listDays(src.lines).find(x => x.day === date.date()) : null;
+    out.push('', `## ${label}（${date.format('M/D')} 周${WEEK[date.day()]}）`);
+    const ls = d ? dayDigest(src.lines, src.p, d, name) : [];
+    out.push(...(ls.length ? ls : ['（没有任务）']));
+  };
+  if (flags.today) section(cur, now, '今天的任务');
+  if (flags.yesterday) section(prev, now.clone().subtract(1, 'day'), '昨天的任务');
+  if (flags.notes && notes && notes.length) {
+    out.push('', '## 本期笔记');
+    for (const n of notes) out.push('', `### 《${n.title}》`, '', n.text.trim());
+  }
+  return out.join('\n');
+}
+
+function agentSystem(slots, context) {
+  return `你是我的私人工作管理助理，嵌在我的 Obsidian 插件 Workmap 里。Workmap 用「时段笔记」管理工作：一期约 10 天，有几条主线（周期任务），每天的任务按艾森豪威尔四象限分类：1 马上做（重要且紧急）、2 排时间做（重要不紧急）、3 少做或不做、4 尽快处理（紧急不重要）。「已拖 N 天」表示这件事被一天天顺延了多久。
+
+下面「上下文」是插件刚从笔记里读出来的最新内容，以它为准。
+
+回答要求：中文；先给结论，再给理由；具体到任务名和第一步怎么做；不编造上下文里没有的信息，不确定就直说或者问我；默认简短，我要详细时再展开。
+
+你不能直接改笔记。需要建议具体改动时（比如我请你安排、拆分、调整今天的任务，或者你看到明显该做的调整），在回复最后附一个语言标记为 workmap 的代码块，内容是 JSON 数组，我在界面上确认后插件才会执行：
+
+\`\`\`workmap
+[{"op":"add","text":"读 reviewer#2 第 1–3 条意见并分类","quad":1,"parent":"TIM_response"}]
+\`\`\`
+
+支持的操作：
+- add：新增今天的任务。text 必填；quad 1–4；parent 可选，填本期主线的原文；note 可选。
+- done / doing / cancel：把今天的某个任务标成完成 / 进行中 / 已取消，task 填任务原文。
+- move：task + quad，换象限。
+- slot：task + slot，排进日程，slot 只能是 ${slots.join('、')} 之一。
+- addPeriod：新增本期主线，text 必填，level 0–3（重要程度），due 可选（YYYY-MM-DD）。
+只在确实需要时附加，一次最多 8 条，只改今天的任务；正文里不要再重复这段 JSON，用一句话说明你建议了哪些改动即可。
+
+# 上下文
+
+${context}`;
+}
+
+const AGENT_BRIEF_PROMPT = `给我一份今日简报，直接输出 Markdown，不要开场白，整体 350 字以内：
+
+### 今天
+按建议的顺序列出今天要做的事（最多 6 条），拖了 3 天以上的标出来。
+### 昨天
+完成了什么、没完成什么，一两句话。
+### 主线
+只写有进展或有风险的主线，一行一条。
+### 笔记要点
+最近笔记里值得记住的 2–3 点；没有笔记就省略这一节。
+### 先做这件
+今天最该先做的一件事，以及具体的第一步。
+
+这次不要附加 workmap 操作块。`;
+
+const AGENT_QUICK = [
+  ['今天先做什么', '今天我应该先做什么？按顺序排一下，说明理由。'],
+  ['总结昨天', '总结一下我昨天做了什么、没做完什么，以及今天该怎么接上。'],
+  ['拖延分析', '这一期哪些事拖得最久？分别卡在哪，怎么破？必要时帮我拆成今天能做的小任务。'],
+  ['拆解任务', '帮我把「」拆成今天能完成的几个小任务，放进合适的象限。'],
+  ['考考我', '根据本期笔记出 3 道题考我，先只给题目，等我回答后再讲解。'],
+];
 
 // 中文输入法选字时按的回车不算提交。Safari / iPad 上这时 isComposing 可能已经是 false，但 keyCode 仍是 229
 function isSubmitKey(e) {
@@ -500,7 +1127,7 @@ const SKY_BOX = { x0: 6, x1: 94, y0: 8, y1: 92 };
 // 只避开更早日子的星星，所以今天再完成任务也不会挪动已有的星星。
 function skyLayout(tasks, periodTasks, viewDay) {
   const done = tasks
-    .filter(t => t.done && t.x != null && t.day != null && t.day <= viewDay)
+    .filter(t => t.done && !t.cancelled && t.x != null && t.day != null && t.day <= viewDay)
     .sort((a, b) => a.day - b.day || a.line - b.line);
   const seen = new Map();
   const placed = { 1: [], 2: [], 3: [], 4: [] };
@@ -747,47 +1374,32 @@ function heatOf(tasks, periodTasks) {
   return { level: clamp(Math.ceil(open.length / 2) + (soon ? 1 : 0), 1, 3), n: open.length, soon };
 }
 
-function longestStreak(doneByDay, name, from, to) {
+// 一段日子里最长连续几天
+function longestRun(days, from, to) {
   let best = 0;
   let run = 0;
   for (let d = from; d <= to; d++) {
-    run = (doneByDay.get(d) || new Set()).has(name) ? run + 1 : 0;
+    run = days.has(d) ? run + 1 : 0;
     best = Math.max(best, run);
   }
   return best;
 }
 
 function periodStats(o) {
-  const { periodTasks, allDaily, habitByDay, habits, start, end, day } = o;
+  const { periodTasks, allDaily, start, end, day } = o;
   const to = Math.min(day, end);
-  let checkins = 0;
-  for (const [d, set] of habitByDay) if (d >= start && d <= to) checkins += set.size;
-  let best = { name: '', n: 0 };
-  for (const h of habits) {
-    const n = longestStreak(habitByDay, h, start, to);
-    if (n > best.n) best = { name: h, n };
-  }
+  const daily = allDaily.filter(t => !t.cancelled);
+  const doneDays = new Set(daily.filter(t => t.done && t.day >= start && t.day <= to).map(t => t.day));
   return {
-    periodDone: periodTasks.filter(t => t.done).length,
+    periodDone: periodTasks.filter(t => t.done && !t.cancelled).length,
     periodTotal: periodTasks.length,
-    dailyDone: allDaily.filter(t => t.done).length,
-    dailyTotal: allDaily.length,
-    checkins,
-    best,
+    dailyDone: daily.filter(t => t.done).length,
+    dailyTotal: daily.length,
+    activeDays: doneDays.size,
+    bestRun: longestRun(doneDays, start, to),
     nth: clamp(day - start + 1, 1, end - start + 1),
     total: end - start + 1,
   };
-}
-
-function habitStreak(doneByDay, name, day, firstDay) {
-  let d = day;
-  if (!(doneByDay.get(d) || new Set()).has(name)) d -= 1;
-  let n = 0;
-  while (d >= firstDay && (doneByDay.get(d) || new Set()).has(name)) {
-    n++;
-    d--;
-  }
-  return n;
 }
 
 function parsePeriod(file) {
@@ -1100,8 +1712,11 @@ function buildDatePicker(parent, opts) {
 class WorkmapPlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    delete this.settings.habits; // 0.6.0 去掉了每日习惯
     this.carrying = false;
+    this.aiBusy = false;
     this.history = [];
+    this.autoWrites = new Map(); // 文件路径 → 最近一次自动写入（顺延、跳到今天）的时间
     const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (this.settings.zone === undefined) this.settings.zone = guessZone(sys);
     if (!US_ZONES.some(z => z[0] === this.settings.usZone)) {
@@ -1109,12 +1724,18 @@ class WorkmapPlugin extends Plugin {
     }
     activeTz = zoneTz(this.settings.zone, this.settings.usZone);
 
+    this.settings.agentCtx = Object.assign({}, DEFAULT_SETTINGS.agentCtx, this.settings.agentCtx);
     this.registerView(VIEW_TYPE, leaf => new MatrixView(leaf, this));
+    this.registerView(AGENT_VIEW, leaf => new AgentView(leaf, this));
     this.addRibbonIcon('layout-grid', '打开 Workmap', () => this.activateView());
+    this.addRibbonIcon('bot', '工作助理（再点一次收起）', () => this.toggleAgent());
+    this.addCommand({ id: 'open-agent', name: '打开 / 收起工作助理', callback: () => this.toggleAgent() });
     this.addCommand({ id: 'open', name: '打开 Workmap', callback: () => this.activateView() });
     this.addCommand({ id: 'new-period', name: '新建下一期时段笔记', callback: () => this.openNewPeriodModal() });
     this.addCommand({ id: 'today-section', name: '跳到今天的小节', callback: () => this.gotoToday() });
-    this.addCommand({ id: 'edit-habits', name: '编辑每日习惯', callback: () => new HabitModal(this).open() });
+    this.addCommand({ id: 'new-note', name: '新建本期笔记', callback: () => this.withCurrentPeriod(p => this.promptNewNote(p.file)) });
+    this.addCommand({ id: 'ai-review', name: 'AI 生成本期回顾', callback: () => this.withCurrentPeriod(p => this.aiReview(p)) });
+    this.addCommand({ id: 'ai-quiz', name: 'AI 根据本期笔记出复习题', callback: () => this.withCurrentPeriod(p => this.aiQuiz(p)) });
     this.addCommand({ id: 'undo', name: '撤销上一步操作', callback: () => this.undo() });
     this.registerObsidianProtocolHandler('workmap', () => this.activateView());
     if (editorExt) this.registerEditorExtension(editorExt);
@@ -1152,9 +1773,34 @@ class WorkmapPlugin extends Plugin {
   async pendingCarry(today) {
     const cur = this.periodFor(today);
     if (!cur) return [];
-    const prev = this.periods().find(p => p.endDate.isBefore(cur.startDate, 'day'));
-    const read = async p => collectCarry(splitLines(await this.app.vault.read(p.file)).lines, p, today);
-    return [...(prev ? await read(prev) : []), ...await read(cur)];
+    const from = this.carryFrom();
+    const read = async p => collectCarry(splitLines(await this.app.vault.read(p.file)).lines, p, today, from);
+    const out = [];
+    for (const p of this.olderPeriods(cur).reverse()) out.push(...await read(p));
+    return [...out, ...await read(cur)];
+  }
+
+  // 顺延要看的更早各期，新的在前。设了顺延起点：起点之后结束的各期；没设：只看上一期。
+  // 不能无条件扫所有往期：几年前没打勾的任务会全部被搬到今天
+  olderPeriods(cur) {
+    const older = this.periods().filter(p => p.endDate.isBefore(cur.startDate, 'day'));
+    const from = this.carryFrom();
+    return from ? older.filter(p => !p.endDate.isBefore(from, 'day')) : older.slice(0, 1);
+  }
+
+  carryFrom() {
+    return parseDate(this.settings.carryStart || '');
+  }
+
+  // 命令用：视图正在看的那一期，没有就用今天所在的一期
+  withCurrentPeriod(fn) {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    const p = (leaf && leaf.view && leaf.view.period) || this.periodFor(zoneNow());
+    if (!p) {
+      new Notice('今天还没有对应的时段笔记，先新建一期');
+      return;
+    }
+    fn(p);
   }
 
   periods() {
@@ -1179,6 +1825,30 @@ class WorkmapPlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
+  }
+
+  async activateAgent() {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(AGENT_VIEW)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false);
+      await leaf.setViewState({ type: AGENT_VIEW, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  // 助理正显示在右侧边栏里：收起边栏；否则打开并切到助理
+  async toggleAgent() {
+    const { workspace } = this.app;
+    const leaf = workspace.getLeavesOfType(AGENT_VIEW)[0];
+    const right = workspace.rightSplit;
+    const el = leaf && leaf.view && leaf.view.containerEl;
+    const shown = el && (typeof el.isShown === 'function' ? el.isShown() : el.offsetParent !== null);
+    if (leaf && right && !right.collapsed && leaf.getRoot() === right && shown) {
+      right.collapse();
+      return;
+    }
+    await this.activateAgent();
   }
 
   refreshViews() {
@@ -1214,9 +1884,13 @@ class WorkmapPlugin extends Plugin {
       after = lines.join(eol);
       return after;
     });
-    if (result && record && before !== after) {
-      this.history.push({ file, before, after });
-      if (this.history.length > 30) this.history.shift();
+    if (result && before !== after) {
+      if (record) {
+        this.history.push({ file, before, after, time: Date.now() });
+        if (this.history.length > 30) this.history.shift();
+      } else {
+        this.autoWrites.set(file.path, Date.now());
+      }
     }
     return result;
   }
@@ -1235,7 +1909,10 @@ class WorkmapPlugin extends Plugin {
     });
     if (!ok) {
       this.history = [];
-      new Notice('笔记在别处改过了，无法撤销');
+      const auto = this.autoWrites.get(h.file.path);
+      new Notice(auto && auto > (h.time || 0)
+        ? '这份笔记后来被自动顺延或「整理成笔记」改过，之前的操作已无法撤销'
+        : '笔记在别处改过了，无法撤销');
     }
     return ok;
   }
@@ -1341,20 +2018,6 @@ class WorkmapPlugin extends Plugin {
     return ok ? id : null;
   }
 
-  async toggleHabit(file, day, name) {
-    const habits = this.settings.habits;
-    await this.mutate(file, lines => {
-      const r = ensureDay(lines, day);
-      const idx = habitLineIndex(lines, r);
-      const done = idx >= 0 ? parseHabits(lines[idx]) : new Set();
-      if (done.has(name)) done.delete(name);
-      else done.add(name);
-      const line = formatHabits(habits, done);
-      if (idx >= 0) lines[idx] = line;
-      else lines.splice(r.start + 1, 0, '', line);
-    });
-  }
-
   async addSection(file) {
     await this.mutate(file, lines => {
       if (periodRange(lines)) return false;
@@ -1370,36 +2033,38 @@ class WorkmapPlugin extends Plugin {
     try {
       const cur = this.periodFor(today);
       if (!cur) return 0;
-      const prev = this.periods().find(p => p.endDate.isBefore(cur.startDate, 'day'));
+      const mode = this.settings.carryMode === 'move' ? 'move' : 'mark';
+      const from = this.carryFrom();
+      const { vault } = this.app;
+      const peek = f => (vault.cachedRead ? vault.cachedRead(f) : vault.read(f));
 
-      // 读出要顺延的任务和把原行标成 [>] 放在同一次 vault.process 里完成。
-      // 以前是先 read 再另起一次写入，中间如果笔记被改过，原行可能没标上，下次又会顺延一遍，出现重复。
-      let fromPrev = [];
-      if (prev) {
-        await this.mutate(prev.file, lines => {
-          fromPrev = collectCarry(lines, prev, today);
-          if (!fromPrev.length) return false;
-          markCarried(lines, fromPrev);
+      // 更早的各期里没做完的任务（中间有几天没建笔记也不会漏）。读出任务和标记原行放在同一次 vault.process 里，
+      // 分成先 read 再写两步的话，中间笔记被改过时原行可能没标上，下次又会顺延一遍，出现重复。
+      const touched = [];
+      for (const p of this.olderPeriods(cur)) {
+        if (!collectCarry(splitLines(await peek(p.file)).lines, p, today, from).length) continue;
+        let items = [];
+        await this.mutate(p.file, lines => {
+          items = collectCarry(lines, p, today, from);
+          if (!items.length) return false;
+          markCarried(lines, items, mode);
         }, false);
+        if (items.length) touched.unshift({ p, items });
       }
+      const fromPrev = touched.flatMap(x => x.items);
       let fromCur = [];
       try {
         await this.mutate(cur.file, lines => {
-          fromCur = collectCarry(lines, cur, today);
+          fromCur = collectCarry(lines, cur, today, from);
           if (!fromPrev.length && !fromCur.length) return false;
-          markCarried(lines, fromCur);
+          markCarried(lines, fromCur, mode);
           insertTaskBlock(lines, ensureDay(lines, today.date()), [...fromPrev, ...fromCur].flatMap(it => it.block));
         }, false);
       } catch (e) {
-        // 本期没写进去：把上一期标上的 [>] 改回来，任务不能丢
+        // 本期没写进去：把更早各期改过的地方还原，任务不能丢
         console.error('[workmap] 顺延失败', e);
-        if (fromPrev.length) {
-          await this.mutate(prev.file, lines => {
-            for (const it of fromPrev) {
-              const idx = lines.indexOf(it.raw.replace(/^- \[ \]/, '- [>]'));
-              if (idx >= 0) lines[idx] = it.raw;
-            }
-          }, false);
+        for (const { p, items } of touched) {
+          await this.mutate(p.file, lines => unmarkCarried(lines, items, mode), false);
         }
         new Notice('自动顺延失败，详情见开发者控制台');
         return 0;
@@ -1419,6 +2084,413 @@ class WorkmapPlugin extends Plugin {
     } finally {
       this.carrying = false;
     }
+  }
+
+  // ----- 周期任务排序 -----
+
+  async movePeriodTask(file, task, before) {
+    const ok = await this.mutate(file, lines => {
+      const r = periodRange(lines);
+      if (!r || !moveTaskBlock(lines, r, task.raw, before ? before.raw : '')) return false;
+    });
+    if (!ok) {
+      new Notice('笔记内容刚刚变化过，已刷新，请再操作一次');
+      this.refreshViews();
+    }
+    return ok;
+  }
+
+  // ----- 本期笔记 -----
+
+  notesFolder(p) {
+    return p.file.path.replace(/\.md$/, '');
+  }
+
+  // 本期的笔记：「## 本期笔记」里的链接在前（按列表顺序），文件夹里没登记的文件放后面
+  notesOf(p, lines) {
+    const { metadataCache, vault } = this.app;
+    const out = [];
+    const seen = new Set();
+    for (const l of listNoteLinks(lines)) {
+      const f = metadataCache.getFirstLinkpathDest(l.link, p.file.path);
+      if (f && seen.has(f.path)) continue;
+      if (f) seen.add(f.path);
+      out.push({ file: f || null, title: l.title || (f ? f.basename : l.link), link: l, listed: true });
+    }
+    const folder = vault.getAbstractFileByPath(this.notesFolder(p));
+    if (folder && folder.children) {
+      for (const f of folder.children) {
+        if (!(f instanceof TFile) || f.extension !== 'md' || seen.has(f.path)) continue;
+        out.push({ file: f, title: f.basename, link: null, listed: false });
+      }
+    }
+    return out;
+  }
+
+  // fileManager.trashFile 按用户的回收站设置处理；老版本没有就放进系统回收站
+  async trash(file) {
+    const fm = this.app.fileManager;
+    if (fm && typeof fm.trashFile === 'function') return fm.trashFile(file);
+    return this.app.vault.trash(file, true);
+  }
+
+  async ensureFolder(path) {
+    const { vault } = this.app;
+    const parts = path.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const sub = parts.slice(0, i).join('/');
+      if (!vault.getAbstractFileByPath(sub)) await vault.createFolder(sub);
+    }
+  }
+
+  async uniquePath(folder, name) {
+    const { vault } = this.app;
+    let path = `${folder}/${name}.md`;
+    for (let n = 2; vault.getAbstractFileByPath(path); n++) path = `${folder}/${name} ${n}.md`;
+    return path;
+  }
+
+  // 新建一篇笔记文件，并登记到时段笔记的「## 本期笔记」里
+  async createNote(period, title, content) {
+    const folder = this.notesFolder(period);
+    await this.ensureFolder(folder);
+    const name = safeFileName(title);
+    const path = await this.uniquePath(folder, name);
+    const file = await this.app.vault.create(path, content);
+    await this.mutate(period.file, lines => addNoteLink(lines, noteLinkLine(path, name)));
+    return file;
+  }
+
+  promptNewNote(periodFile) {
+    const p = this.periods().find(x => x.file.path === periodFile.path);
+    if (!p) return;
+    new NameModal(this, '新建本期笔记', '学习笔记、会议记录之类的长内容。会单独存成一个文件，放在这一期的文件夹里。', async title => {
+      const file = await this.createNote(p, title, `# ${title}\n\n`);
+      await this.app.workspace.getLeaf('tab').openFile(file, { active: true });
+    }).open();
+  }
+
+  async linkNote(period, file) {
+    await this.mutate(period.file, lines => addNoteLink(lines, noteLinkLine(file.path, file.basename)));
+  }
+
+  async unlinkNote(period, link) {
+    await this.mutate(period.file, lines => {
+      const r = notesRange(lines);
+      const idx = r ? findRaw(lines, r, link.raw) : -1;
+      if (idx < 0) return false;
+      lines.splice(idx, 1);
+    });
+  }
+
+  // 把粘贴在时段笔记里、不属于任何小节的内容拆成单独的笔记。原文挪到新文件里，时段笔记里只留链接。
+  // 先建好文件再改时段笔记；改的时候笔记已经变了就放弃，并删掉刚建的文件。不进撤销历史（撤销只会还原时段笔记，留下重复的文件）
+  async archiveStray(period) {
+    const { vault } = this.app;
+    const before = await vault.read(period.file);
+    const taken = takeStray(splitLines(before).lines);
+    if (!taken.length) return 0;
+    const folder = this.notesFolder(period);
+    await this.ensureFolder(folder);
+    const made = [];
+    try {
+      for (const t of taken) {
+        const path = await this.uniquePath(folder, t.title);
+        made.push({ file: await vault.create(path, t.text), title: path.split('/').pop().replace(/\.md$/, '') });
+      }
+    } catch (e) {
+      for (const m of made) await this.trash(m.file);
+      throw e;
+    }
+    let same = false;
+    await vault.process(period.file, data => {
+      if (data !== before) return data;
+      same = true;
+      const { lines, eol } = splitLines(data);
+      takeStray(lines);
+      for (const m of made) addNoteLink(lines, noteLinkLine(m.file.path, m.title));
+      return lines.join(eol);
+    });
+    if (!same) {
+      for (const m of made) await this.trash(m.file);
+      new Notice('笔记内容刚刚变化过，已刷新，请再操作一次');
+      this.refreshViews();
+      return 0;
+    }
+    this.autoWrites.set(period.file.path, Date.now());
+    new Notice(`已整理成 ${made.length} 篇本期笔记：${made.map(m => m.title).join('、')}`);
+    return made.length;
+  }
+
+  // ----- 大模型 -----
+
+  async readNotes(period, lines, only) {
+    const list = only ? [only] : this.notesOf(period, lines).filter(n => n.file);
+    const out = [];
+    let budget = 60000;
+    for (const n of list) {
+      const f = n.file;
+      const cache = this.app.metadataCache.getFileCache(f);
+      const kind = cache && cache.frontmatter && cache.frontmatter.workmap;
+      if (!only && (kind === 'ai-review' || kind === 'ai-quiz')) continue; // 以前生成的回顾、复习题不再喂回去
+      let text = (await this.app.vault.cachedRead(f)).replace(/^---\n[\s\S]*?\n---\n/, '');
+      if (text.length > 20000) text = text.slice(0, 20000) + '\n…（后面省略）';
+      if (text.length > budget) text = text.slice(0, budget) + '\n…（后面省略）';
+      budget -= text.length;
+      out.push({ title: n.title, text });
+      if (budget <= 0) break;
+    }
+    return out;
+  }
+
+  async chat(system, user) {
+    const s = this.settings;
+    if (!s.aiKey) throw new Error('还没有填写 API 密钥（设置 → Workmap → 大模型）');
+    const base = (s.aiBase || DEFAULT_SETTINGS.aiBase).replace(/\/+$/, '');
+    const res = await (this._request || requestUrl)({
+      url: `${base}/chat/completions`,
+      method: 'POST',
+      contentType: 'application/json',
+      headers: { Authorization: `Bearer ${s.aiKey}` },
+      body: JSON.stringify({
+        model: s.aiModel || DEFAULT_SETTINGS.aiModel,
+        max_tokens: 8000,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      }),
+      throw: false,
+    });
+    let data = null;
+    try {
+      data = res.json;
+    } catch (e) {
+      data = null;
+    }
+    if (res.status >= 400 || !data) throw new Error(httpErrorText(res.status, data && data.error && data.error.message));
+    const c = data.choices && data.choices[0];
+    const text = c && c.message && typeof c.message.content === 'string' ? c.message.content.trim() : '';
+    if (!text) throw new Error('模型没有返回内容');
+    return { text, model: data.model || s.aiModel, truncated: c.finish_reason === 'length' };
+  }
+
+  async runAI(kind, label, makePrompt, period, title) {
+    if (this.aiBusy) {
+      new Notice('上一个 AI 任务还在生成，请稍等');
+      return null;
+    }
+    this.aiBusy = true;
+    this.refreshViews();
+    const notice = new Notice(`正在用 ${this.settings.aiModel} ${label}，通常要半分钟到两分钟…`, 0);
+    try {
+      const lines = splitLines(await this.app.vault.read(period.file)).lines;
+      const prompt = await makePrompt(lines);
+      if (!prompt) return null;
+      const r = await this.chat(prompt.system, prompt.user);
+      const now = zoneNow();
+      const body = [
+        '---',
+        `workmap: ${kind}`,
+        `model: ${r.model}`,
+        `created: ${now.format('YYYY-MM-DD HH:mm')}`,
+        '---',
+        '',
+        `# ${title}`,
+        '',
+        `> 由 ${r.model} 根据 [[${period.file.path.replace(/\.md$/, '')}|${period.label}]] 生成于 ${now.format('M/D HH:mm')}`,
+        '',
+        r.text,
+        r.truncated ? '\n> [!warning] 输出达到长度上限，后面可能被截断了。' : '',
+        '',
+      ].join('\n');
+      const file = await this.createNote(period, `${title} ${now.format('M-D HHmm')}`, body);
+      await this.app.workspace.getLeaf('tab').openFile(file, { active: true });
+      return file;
+    } catch (e) {
+      console.error('[workmap] AI 请求失败', e);
+      new Notice(`${label}失败：${e.message || e}`, 10000);
+      return null;
+    } finally {
+      notice.hide();
+      this.aiBusy = false;
+      this.refreshViews();
+    }
+  }
+
+  // ----- 工作助理 -----
+
+  async agentContextFor(flags) {
+    const now = zoneNow();
+    const read = async x => (x ? { p: x, lines: splitLines(await this.app.vault.cachedRead(x.file)).lines } : null);
+    const p = this.periodFor(now);
+    const cur = await read(p);
+    const yp = this.periodFor(now.clone().subtract(1, 'day'));
+    const prev = yp && p && yp.file.path === p.file.path ? cur : await read(yp);
+    const notes = flags.notes && cur ? await this.readNotes(p, cur.lines) : [];
+    return agentContext({ now, cur, prev, flags, notes });
+  }
+
+  // 流式调用：每收到一段就 onDelta(累计结果)。fetch 不可用或失败时退回一次性请求
+  async streamChat(o) {
+    const { model, effort, system, messages, signal, onDelta } = o;
+    const s = this.settings;
+    if (!s.aiKey) throw new Error('还没有填写 API 密钥（设置 → Workmap → 大模型）');
+    const api = agentModel(model).api;
+    const req = buildChatRequest({ base: s.aiBase, key: s.aiKey, model, effort, system, messages, stream: true });
+    const acc = { text: '', thinking: '', usage: null };
+    const doFetch = this._fetch || (typeof fetch === 'function' ? fetch.bind(window) : null);
+    let res = null;
+    if (doFetch) {
+      try {
+        res = await doFetch(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body), signal });
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        console.warn('[workmap] 流式请求失败，改用一次性请求', e);
+        res = null;
+      }
+    }
+    if (res && !res.ok) {
+      const t = await res.text();
+      let msg = '';
+      try {
+        msg = JSON.parse(t).error.message;
+      } catch (e) {
+        msg = t.slice(0, 200);
+      }
+      throw new Error(httpErrorText(res.status, msg));
+    }
+    if (!res || !res.body) {
+      const once = buildChatRequest({ base: s.aiBase, key: s.aiKey, model, effort, system, messages, stream: false });
+      const r = await (this._request || requestUrl)({ url: once.url, method: 'POST', headers: once.headers, body: JSON.stringify(once.body), throw: false });
+      let data = null;
+      try {
+        data = r.json;
+      } catch (e) {
+        data = null;
+      }
+      if (r.status >= 400 || !data) throw new Error(httpErrorText(r.status, data && data.error && data.error.message));
+      Object.assign(acc, replyOf(api, data));
+      if (onDelta) onDelta(acc);
+      return acc;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    const feed = events => {
+      let changed = false;
+      for (const ev of events) {
+        const d = streamDelta(api, ev);
+        if (d.error) throw new Error(d.error);
+        if (d.text || d.thinking) changed = true;
+        acc.text += d.text;
+        acc.thinking += d.thinking;
+        if (d.usage) {
+          acc.usage = Object.assign({}, acc.usage);
+          for (const [k, v] of Object.entries(d.usage)) if (v !== undefined && v !== '') acc.usage[k] = v;
+        }
+      }
+      if (changed && onDelta) onDelta(acc);
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const r = sseSplit(buf);
+      buf = r.rest;
+      feed(r.events);
+    }
+    feed(sseSplit(buf + '\n').events);
+    return acc;
+  }
+
+  // 执行助理建议、用户确认过的一条改动。只改今天的任务；出错时抛出原因
+  async applyAction(a) {
+    const today = zoneNow().startOf('day');
+    const p = this.periodFor(today);
+    if (!p) throw new Error('今天没有对应的时段笔记');
+    const lines = splitLines(await this.app.vault.read(p.file)).lines;
+    const pr = periodRange(lines);
+    const pts = pr ? collectTasks(lines, pr, 'period') : [];
+    const d = dayRange(lines, today.date());
+    const tasks = d ? collectTasks(lines, d, 'day') : [];
+    const q = clamp(Math.round(+a.quad) || 1, 1, 4);
+    if (a.op === 'add') {
+      const text = String(a.text || '').trim();
+      if (!text) throw new Error('缺少任务内容');
+      let parent = '';
+      const pt = a.parent ? matchTask(pts, String(a.parent)) : null;
+      if (pt) parent = (await this.ensurePeriodId(p.file, pt)) || '';
+      await this.addDayTask(p.file, today.date(), Object.assign({ text, done: false, parent, note: a.note ? String(a.note) : '' }, endPos(tasks, q)));
+      return;
+    }
+    if (a.op === 'addPeriod') {
+      const text = String(a.text || '').trim();
+      if (!text) throw new Error('缺少主线内容');
+      await this.addPeriodTask(p.file, {
+        text,
+        level: clamp(Math.round(+a.level) || 0, 0, 3),
+        due: parseDate(String(a.due || '')) ? a.due : '',
+        done: false,
+        id: newId(),
+        note: '',
+      });
+      return;
+    }
+    const t = matchTask(tasks, String(a.task || ''));
+    if (!t) throw new Error(`今天的任务里找不到「${a.task}」`);
+    if (a.op === 'slot' && !this.settings.slots.includes(a.slot)) throw new Error(`没有「${a.slot}」这个时段`);
+    const patch = {
+      done: { done: true },
+      doing: { doing: true, done: false, cancelled: false },
+      cancel: { done: true, cancelled: true, doing: false },
+      move: endPos(tasks.filter(x => x !== t), q),
+      slot: { slot: a.slot },
+    }[a.op];
+    if (!patch) throw new Error(`不支持的操作 ${a.op}`);
+    if (!(await this.updateTask(p.file, { kind: 'day', day: today.date() }, t, patch))) throw new Error('笔记刚刚变化过，请再点一次');
+  }
+
+  // 对话存在今天所在一期的「对话」文件夹里；没有时段笔记就不存
+  async saveChat(chat) {
+    const text = formatChat(chat);
+    const { vault } = this.app;
+    if (chat.file && vault.getAbstractFileByPath(chat.file.path)) {
+      await vault.modify(chat.file, text);
+      return chat.file;
+    }
+    const p = this.periodFor(zoneNow());
+    if (!p) return null;
+    const folder = `${this.notesFolder(p)}/${CHAT_DIR}`;
+    await this.ensureFolder(folder);
+    const when = moment(chat.created, 'YYYY-MM-DD HH:mm');
+    const path = await this.uniquePath(folder, `${when.isValid() ? when.format('MM-DD HHmm') : ''} ${chat.title}`.trim());
+    chat.file = await vault.create(path, text);
+    return chat.file;
+  }
+
+  listChats() {
+    const re = new RegExp(`^\\d{4}/\\d{1,2}/\\d{1,2}-\\d{1,2}/${CHAT_DIR}/`);
+    return this.app.vault.getMarkdownFiles().filter(f => re.test(f.path)).sort((a, b) => b.stat.mtime - a.stat.mtime);
+  }
+
+  aiReview(period) {
+    return this.runAI('ai-review', '生成本期回顾', async lines => ({
+      system: AI_REVIEW_PROMPT,
+      user: periodDigest({ p: period, lines, today: zoneNow().startOf('day'), notes: await this.readNotes(period, lines) }),
+    }), period, 'AI 回顾');
+  }
+
+  // only：只根据某一篇笔记出题
+  aiQuiz(period, only) {
+    return this.runAI('ai-quiz', '出复习题', async lines => {
+      const notes = await this.readNotes(period, lines, only);
+      if (!notes.length || !notes.some(n => n.text.trim().length > 20)) {
+        new Notice('本期还没有可以出题的笔记。先在「本期笔记」里记一些内容');
+        return null;
+      }
+      return {
+        system: AI_QUIZ_PROMPT,
+        user: notes.map(n => `# 《${n.title}》\n\n${n.text.trim()}`).join('\n\n'),
+      };
+    }, period, only ? `复习题 · ${only.title}` : '复习题');
   }
 
   // ----- 新建时段笔记 -----
@@ -1512,9 +2584,8 @@ class MatrixView extends ItemView {
     this.periodTasks = [];
     this.allDaily = [];
     this.dayTasks = [];
-    this.habitsDone = new Set();
-    this.habitCounts = new Map();
-    this.habitByDay = new Map();
+    this.notes = [];
+    this.lines = [];
     this.carried = new Set();
     this.carryOpen = false;
     this.dragging = false;
@@ -1571,6 +2642,13 @@ class MatrixView extends ItemView {
       this.registerEvent(this.app.vault.on(ev, () => this.requestRefresh()));
     }
     this.registerEvent(this.app.workspace.on('css-change', () => this.requestRefresh()));
+    // 本期笔记改了（预览、AI 生成的标记）：慢一点刷新，别在另一个窗格打字时频繁重建视图
+    this.registerEvent(this.app.metadataCache.on('changed', f => {
+      if (!this.period || !f.path.startsWith(this.plugin.notesFolder(this.period) + '/')) return;
+      if (f.path.includes(`/${CHAT_DIR}/`)) return;
+      window.clearTimeout(this.noteTimer);
+      this.noteTimer = window.setTimeout(() => this.requestRefresh(), 2000);
+    }));
     this.registerInterval(window.setInterval(() => this.requestRefresh(), 5 * 60 * 1000));
     this.registerInterval(window.setInterval(() => this.meteor(), 6000));
     this.registerInterval(window.setInterval(() => this.tickClock(), 10000));
@@ -1587,6 +2665,7 @@ class MatrixView extends ItemView {
 
   async onClose() {
     window.clearTimeout(this.timer);
+    window.clearTimeout(this.noteTimer);
     window.clearTimeout(this.toastTimer);
     if (this.toastEl) this.toastEl.remove();
     if (this.fxEl) this.fxEl.remove();
@@ -1781,8 +2860,6 @@ class MatrixView extends ItemView {
     const s = periodStats({
       periodTasks: this.periodTasks,
       allDaily: this.allDaily,
-      habitByDay: this.habitByDay,
-      habits: this.settings.habits,
       start: p.start,
       end: p.endDate.date(),
       day: this.statDay(),
@@ -1809,8 +2886,8 @@ class MatrixView extends ItemView {
     };
     cell(String(s.periodDone), '条主线');
     cell(`${s.dailyDone}/${s.dailyTotal}`, '每日任务');
-    cell(String(s.checkins), '次习惯打卡');
-    cell(s.best.n ? `${s.best.n} 天` : '—', s.best.n ? `最长连续 · ${s.best.name}` : '最长连续');
+    cell(`${s.activeDays} 天`, '有完成的日子');
+    cell(s.bestRun ? `${s.bestRun} 天` : '—', '最长连续');
   }
 
   // 「马上做」的火苗：图标随火势变化，清空时冒烟
@@ -1928,17 +3005,16 @@ class MatrixView extends ItemView {
     const days = listDays(lines);
     this.allDaily = days.flatMap(d => collectTasks(lines, d, 'day').map(t => Object.assign(t, { day: d.day })));
     this.dayTasks = this.allDaily.filter(t => t.day === this.day.date());
-    this.habitCounts = new Map();
-    this.habitByDay = new Map();
-    this.habitsDone = new Set();
-    for (const d of days) {
-      const idx = habitLineIndex(lines, d);
-      if (idx < 0) continue;
-      const done = parseHabits(lines[idx]);
-      this.habitByDay.set(d.day, done);
-      if (d.day === this.day.date()) this.habitsDone = done;
-      for (const h of done) this.habitCounts.set(h, (this.habitCounts.get(h) || 0) + 1);
+    // 拖了几天：有 %%c%% 用它，老的顺延任务往前找同名的 [>]
+    for (const t of this.dayTasks) {
+      if (t.done) continue;
+      const since = t.since || chainOrigin(lines, this.period, t.text, t.day);
+      t.age = since ? carryAge(since, this.day) : 0;
+      t.origin = since;
     }
+    this.lines = lines;
+    this.notes = this.plugin.notesOf(this.period, lines);
+    const stray = strayBlocks(lines);
 
     const carry = this.settings.carry;
     const showCarry = this.follow && this.day.isSame(today, 'day') && carry && carry.date === today.format('YYYY-MM-DD');
@@ -1947,14 +3023,15 @@ class MatrixView extends ItemView {
     this.buildHero(el, periods, today);
     if (held.length) this.buildCarryHold(el, held, today);
     if (showCarry && !carry.dismissed) this.buildCarry(el, carry);
+    if (stray.length) this.buildStray(el, lines, stray);
     this.buildPeriodSection(el);
-    this.buildHabits(el, today);
     this.buildDayHead(el, today);
     this.buildComposer(el);
     const main = el.createDiv('pm-main');
     this.buildBoard(main);
     this.buildTimeline(main, today);
     this.buildTray(el);
+    this.buildNotes(el);
     if (!this.settings.hideTips) this.buildTips(el);
     el.scrollTop = scroll;
     this.placeRivers();
@@ -2035,6 +3112,7 @@ class MatrixView extends ItemView {
     };
 
     const acts = side.createDiv('pm-actions');
+    iconBtn(acts, 'bot', '工作助理').onclick = () => this.plugin.toggleAgent();
     const open = iconBtn(acts, 'file-text', '打开笔记');
     open.disabled = !this.file;
     open.onclick = () => this.plugin.openFileAtLine(this.file, 0);
@@ -2148,14 +3226,13 @@ class MatrixView extends ItemView {
     textBtn(head, '新建', 'is-ghost', 'plus').onclick = () => this.newPeriodTask();
 
     const grid = sec.createDiv('pm-pgrid');
+    this.pgrid = grid;
     if (this.periodTasks.length && this.periodTasks.every(t => t.done)) this.buildStatsCard(grid);
     else this.stats = null;
+    // 顺序就是笔记里的顺序（拖动卡片调整），已完成的放最后。重要程度看星标和左边的色条
     const tasks = this.periodTasks
       .filter(t => !(this.settings.hideDone && t.done))
-      .sort((a, b) =>
-        (a.done - b.done)
-        || (b.level - a.level)
-        || ((a.due || '9999') < (b.due || '9999') ? -1 : (a.due || '9999') > (b.due || '9999') ? 1 : 0));
+      .sort((a, b) => (a.done - b.done) || (a.line - b.line));
     for (const t of tasks) grid.appendChild(this.makePeriodCard(t));
     if (!tasks.length && !this.periodTasks.length) {
       const add = grid.createDiv('pm-pcard is-add');
@@ -2177,7 +3254,10 @@ class MatrixView extends ItemView {
   makePeriodCard(t) {
     const card = createDiv({ cls: 'pm-pcard' });
     card.dataset.level = String(t.level);
+    card.dataset.line = String(t.line);
     if (t.done) card.addClass('is-done');
+    if (t.cancelled) card.addClass('is-cancelled');
+    if (t.doing) card.addClass('is-doing');
     const scope = { kind: 'period' };
     const upd = patch => this.plugin.updateTask(this.file, scope, t, patch);
 
@@ -2185,7 +3265,10 @@ class MatrixView extends ItemView {
     const chk = buildCheck(head, t.done, (v, el) => this.setDone(scope, t, v, el));
     if (this.popMatch(t)) this.replayPop(chk, card);
     buildStars(head, t.level, v => upd({ level: v }));
+    if (t.level) head.createSpan({ cls: 'pm-level-tag', text: LEVEL_NAMES[t.level] });
     head.createDiv('pm-spacer');
+    if (t.doing) head.createSpan({ cls: 'pm-pill is-doing', text: '进行中' });
+    if (t.cancelled) head.createSpan({ cls: 'pm-pill', text: '已取消' });
     if (t.due && !t.done) {
       const c = countdown(t.due);
       const pill = head.createSpan({ cls: `pm-pill ${c.cls}`, text: c.short });
@@ -2202,7 +3285,7 @@ class MatrixView extends ItemView {
       this.bindLinks(note);
     }
 
-    const linked = t.id ? this.allDaily.filter(d => d.parent === t.id) : [];
+    const linked = t.id ? this.allDaily.filter(d => d.parent === t.id && !d.cancelled) : [];
     const doneN = linked.filter(d => d.done).length;
     const todayN = linked.filter(d => d.day === this.day.date()).length;
     const foot = card.createDiv('pm-pcard-foot');
@@ -2229,6 +3312,8 @@ class MatrixView extends ItemView {
           .setChecked(t.level === lv)
           .onClick(() => upd({ level: lv })));
       }
+      menu.addSeparator();
+      this.statusItems(menu, t, upd);
       menu.addSeparator();
       menu.addItem(i => i.setTitle('在笔记中定位').setIcon('file-search')
         .onClick(() => this.plugin.openFileAtLine(this.file, t.line)));
@@ -2259,40 +3344,6 @@ class MatrixView extends ItemView {
         parent: id,
       }, endPos(this.dayTasks, q)));
     }).open();
-  }
-
-  // ----- 习惯 -----
-
-  buildHabits(el, today) {
-    const row = el.createDiv('pm-habits-row');
-    const habits = this.settings.habits;
-    const doneToday = habits.filter(h => this.habitsDone.has(h)).length;
-    const label = row.createDiv('pm-habits-label');
-    label.createSpan({ cls: 'pm-label', text: this.day.isSame(today, 'day') ? '今日习惯' : '当天习惯' });
-    label.createSpan({ cls: 'pm-count', text: `${doneToday}/${habits.length}` });
-
-    const p = this.period;
-    const elapsed = clamp(today.diff(p.startDate, 'days') + 1, 1, p.endDate.diff(p.startDate, 'days') + 1);
-    const list = row.createDiv('pm-habits');
-    for (const h of habits) {
-      const on = this.habitsDone.has(h);
-      const chip = list.createDiv({ cls: 'pm-habit' + (on ? ' is-on' : '') });
-      setIcon(chip.createSpan('pm-habit-dot'), 'check');
-      chip.createSpan({ cls: 'pm-habit-name', text: h });
-      const n = this.habitCounts.get(h) || 0;
-      const streak = habitStreak(this.habitByDay, h, this.day.date(), p.start);
-      if (streak >= 2) {
-        const s = chip.createSpan('pm-habit-streak');
-        setIcon(s.createSpan('pm-habit-flame'), 'flame');
-        s.createSpan({ text: String(streak) });
-      }
-      chip.title = (streak ? `连续 ${streak} 天 · ` : '') + `本期打卡 ${n} / ${elapsed} 天`;
-      chip.onclick = () => this.plugin.toggleHabit(this.file, this.day.date(), h);
-    }
-    const edit = list.createDiv({ cls: 'pm-habit is-edit', attr: { 'aria-label': '编辑习惯' } });
-    setIcon(edit, habits.length ? 'pencil' : 'plus');
-    if (!habits.length) edit.createSpan({ text: '添加习惯' });
-    edit.onclick = () => new HabitModal(this.plugin).open();
   }
 
   // ----- 当天任务 -----
@@ -2349,7 +3400,7 @@ class MatrixView extends ItemView {
     const psel = tools.createEl('select', { cls: 'pm-select is-small' });
     psel.createEl('option', { value: '', text: '不归属周期任务' });
     for (const t of this.periodTasks.filter(p => !p.done)) {
-      psel.createEl('option', { value: t.raw, text: `↳ ${t.text}` });
+      psel.createEl('option', { value: t.raw, text: `↳ ${t.level ? '★'.repeat(t.level) + ' ' : ''}${t.text}` });
     }
     psel.value = this.periodTasks.some(p => p.raw === this.lastParent) ? this.lastParent : '';
     psel.onchange = () => { this.lastParent = psel.value; };
@@ -2508,7 +3559,7 @@ class MatrixView extends ItemView {
 
     for (const s of this.sky.stars) {
       if (s.q !== q) continue;
-      const el = sky.createDiv({ cls: 'pm-star' + (s.today ? ' is-today' : '') });
+      const el = sky.createDiv({ cls: 'pm-skystar' + (s.today ? ' is-today' : '') });
       el.dataset.level = String(s.level);
       if (s.parent) el.dataset.parent = s.parent;
       el.style.left = s.x + '%';
@@ -2637,7 +3688,7 @@ class MatrixView extends ItemView {
     if (!t.parent) return;
     const kin = sky.querySelectorAll(`[data-parent="${t.parent}"]`);
     for (const el of kin) el.toggleClass('is-kin', on);
-    const first = [...kin].find(el => el.hasClass('pm-star'));
+    const first = [...kin].find(el => el.hasClass('pm-skystar'));
     if (!star && first) first.toggleClass('is-label', on);
   }
 
@@ -2743,11 +3794,129 @@ class MatrixView extends ItemView {
     for (const t of list) box.appendChild(this.makeCard(t, false));
   }
 
+  // ----- 游离内容 -----
+
+  buildStray(el, lines, blocks) {
+    const n = blocks.reduce((a, b) => a + b.end - b.start, 0);
+    const box = el.createDiv('pm-carry pm-stray');
+    const head = box.createDiv('pm-carry-head');
+    setIcon(head.createSpan('pm-carry-icon'), 'file-text');
+    const txt = head.createDiv('pm-carry-text');
+    txt.createSpan({
+      cls: 'pm-carry-title',
+      text: `笔记里有 ${blocks.length} 段内容不属于任何小节（共 ${n} 行）`,
+    });
+    txt.createSpan({
+      cls: 'pm-carry-sub',
+      text: blocks.map(b => `《${strayTitle(lines.slice(b.start, b.end))}》`).join('、') + ' · 可以整理成单独的本期笔记，原文会完整挪过去',
+    });
+    head.createDiv('pm-spacer');
+    textBtn(head, '定位', 'is-ghost').onclick = () => this.plugin.openFileAtLine(this.file, blocks[0].start);
+    const go = textBtn(head, '整理成本期笔记', 'is-primary');
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await this.plugin.archiveStray(this.period);
+      } finally {
+        go.disabled = false;
+      }
+    };
+  }
+
+  // ----- 本期笔记 -----
+
+  buildNotes(el) {
+    const sec = el.createDiv('pm-section pm-notes');
+    const head = sec.createDiv('pm-section-head');
+    head.createEl('h2', { cls: 'pm-h2', text: '本期笔记' });
+    head.createSpan({ cls: 'pm-count', text: this.notes.length ? `${this.notes.length} 篇` : '学习笔记、会议记录放在这里' });
+    head.createDiv('pm-spacer');
+    const busy = this.plugin.aiBusy;
+    const quiz = textBtn(head, busy ? '生成中…' : 'AI 出题', 'is-ghost', 'graduation-cap');
+    const review = textBtn(head, busy ? '生成中…' : 'AI 回顾', 'is-ghost', 'sparkles');
+    quiz.disabled = busy;
+    review.disabled = busy;
+    quiz.title = '根据本期笔记出一套复习题，带折叠的参考答案';
+    review.title = '把本期的主线、每天的任务、拖延情况和笔记交给大模型，写一份复盘';
+    quiz.onclick = () => this.plugin.aiQuiz(this.period);
+    review.onclick = () => this.plugin.aiReview(this.period);
+    textBtn(head, '新建', 'is-ghost', 'plus').onclick = () => this.plugin.promptNewNote(this.file);
+
+    const grid = sec.createDiv('pm-ngrid');
+    for (const n of this.notes) grid.appendChild(this.makeNoteCard(n));
+    if (!this.notes.length) {
+      const add = grid.createDiv('pm-ncard is-add');
+      add.createSpan({ text: '＋ 记一篇本期笔记' });
+      add.onclick = () => this.plugin.promptNewNote(this.file);
+    }
+  }
+
+  makeNoteCard(n) {
+    const card = createDiv({ cls: 'pm-ncard' });
+    const f = n.file;
+    const cache = f ? this.app.metadataCache.getFileCache(f) : null;
+    const kind = (cache && cache.frontmatter && cache.frontmatter.workmap) || '';
+    if (kind) card.dataset.kind = kind;
+    if (!f) card.addClass('is-missing');
+    const head = card.createDiv('pm-ncard-head');
+    setIcon(head.createSpan('pm-ncard-icon'), kind === 'ai-review' ? 'sparkles' : kind === 'ai-quiz' ? 'graduation-cap' : 'file-text');
+    head.createDiv({ cls: 'pm-ncard-title', text: n.title });
+    const preview = card.createDiv('pm-ncard-preview');
+    const foot = card.createDiv('pm-ncard-foot');
+    if (!f) {
+      preview.setText(`找不到 ${n.link.link}`);
+    } else {
+      const m = moment(f.stat.mtime);
+      foot.createSpan({ text: `${m.month() + 1}/${m.date()} 修改` });
+      if (!n.listed) foot.createSpan({ cls: 'pm-ncard-tag', text: '未登记' }).title = '在本期文件夹里，但没写进「## 本期笔记」。右键可以登记';
+      // 预览异步补上，不挡住整页渲染
+      this.app.vault.cachedRead(f).then(text => {
+        const body = text.replace(/^---\n[\s\S]*?\n---\n/, '');
+        const lines = body.split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !/^(#{1,6}\s|---|>\s*由 |\|)/.test(l));
+        preview.setText(lines.slice(0, 3).join(' ').replace(/[*`>#]/g, '').slice(0, 120));
+        foot.createSpan({ text: `约 ${body.replace(/\s/g, '').length} 字` });
+      });
+    }
+    const open = how => f && this.app.workspace.getLeaf(how).openFile(f, { active: true });
+    card.onclick = e => open(e.metaKey || e.ctrlKey ? 'split' : 'tab');
+    card.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      const menu = new Menu();
+      if (f) {
+        menu.addItem(i => i.setTitle('在新标签页打开').setIcon('file').onClick(() => open('tab')));
+        menu.addItem(i => i.setTitle('在右侧打开').setIcon('columns').onClick(() => open('split')));
+        if (!kind) {
+          menu.addItem(i => i.setTitle('AI 根据这篇出题').setIcon('graduation-cap')
+            .onClick(() => this.plugin.aiQuiz(this.period, n)));
+        }
+        menu.addSeparator();
+      }
+      if (n.listed) {
+        menu.addItem(i => i.setTitle('从列表移除（不删文件）').setIcon('list-x')
+          .onClick(() => this.plugin.unlinkNote(this.period, n.link)));
+      } else if (f) {
+        menu.addItem(i => i.setTitle('登记到「本期笔记」').setIcon('list-plus')
+          .onClick(() => this.plugin.linkNote(this.period, f)));
+      }
+      if (f) {
+        menu.addItem(i => i.setTitle('移到废纸篓').setIcon('trash').onClick(async () => {
+          if (n.listed) await this.plugin.unlinkNote(this.period, n.link);
+          await this.app.vault.trash(f, true); // 系统废纸篓，可以在访达里恢复
+          new Notice(`已把「${n.title}」移到废纸篓`);
+        }));
+      }
+      menu.showAtMouseEvent(e);
+    });
+    return card;
+  }
+
   buildTips(el) {
     const tip = el.createDiv('pm-tips');
     setIcon(tip.createSpan('pm-tips-icon'), 'lightbulb');
     tip.createSpan({
-      text: '拖周期任务卡片进象限可以拆出今天的子任务；拖任务上下调整顺序，拖到右侧时段排进日程；双击编辑，右键更多操作，⌘Z 撤销。',
+      text: '拖周期任务卡片可以调整顺序，拖进象限可以拆出今天的子任务；拖任务上下调整顺序，拖到右侧时段排进日程；双击编辑，右键标记进行中 / 已取消，⌘Z 撤销。',
     });
     iconBtn(tip, 'x', '不再显示').onclick = async () => {
       this.settings.hideTips = true;
@@ -2760,6 +3929,8 @@ class MatrixView extends ItemView {
     const scope = this.dayScope();
     const upd = patch => this.plugin.updateTask(this.file, scope, t, patch);
     if (t.done) card.addClass('is-done');
+    if (t.cancelled) card.addClass('is-cancelled');
+    if (t.doing) card.addClass('is-doing');
     if (t.x != null) card.dataset.q = String(quadOf(t));
 
     const chk = buildCheck(card, t.done, (v, el) => this.setDone(scope, t, v, el));
@@ -2776,19 +3947,31 @@ class MatrixView extends ItemView {
 
     const tags = [];
     const parent = t.parent ? this.periodTasks.find(p => p.id === t.parent) : null;
-    if (parent) tags.push({ cls: 'pm-parent', text: parent.text });
+    if (t.doing) tags.push({ cls: 'pm-doing-tag', text: '进行中' });
+    if (t.cancelled) tags.push({ cls: 'pm-cancel-tag', text: '已取消' });
+    if (parent) tags.push({ cls: 'pm-parent', text: parent.text, level: parent.level });
     if (t.slot) tags.push({ cls: 'pm-slot-tag', text: t.slot.replace('-', '–') });
     if (t.due) {
       const d = countdown(t.due);
       tags.push({ cls: `pm-due ${d.cls}`, text: d.text });
     }
-    if (this.carried.has(t.raw)) tags.push({ cls: 'pm-carry-tag', text: '顺延' });
+    if (t.age > 0) {
+      const o = parseDate(t.origin);
+      tags.push({
+        cls: 'pm-age ' + (t.age >= 7 ? 'is-hi' : t.age >= 3 ? 'is-mid' : 'is-lo'),
+        text: `已拖 ${t.age} 天`,
+        title: o ? `最早安排在 ${o.month() + 1}/${o.date()}，之后每天没做完都顺延了下来` : '',
+      });
+    } else if (this.carried.has(t.raw)) {
+      tags.push({ cls: 'pm-carry-tag', text: '顺延' });
+    }
     if (t.note) tags.push({ cls: 'pm-note-tag', text: '备注', title: t.note });
     if (tags.length) {
       const row = body.createDiv('pm-tags');
       for (const tg of tags) {
         const s = row.createSpan({ cls: tg.cls, text: tg.text });
         if (tg.title) s.title = tg.title;
+        if (tg.level) s.dataset.level = String(tg.level);
       }
     }
 
@@ -2816,10 +3999,27 @@ class MatrixView extends ItemView {
         menu.addItem(i => i.setTitle('移出日程').setIcon('clock').onClick(() => upd({ slot: '' })));
       }
       menu.addSeparator();
+      this.statusItems(menu, t, upd);
+      menu.addSeparator();
       menu.addItem(i => i.setTitle('删除').setIcon('trash').onClick(() => this.remove(scope, t)));
       menu.showAtMouseEvent(e);
     });
     return card;
+  }
+
+  // 进行中 [/]、已取消 [-]，以及恢复成未开始
+  statusItems(menu, t, upd) {
+    if (!t.doing && !t.done) {
+      menu.addItem(i => i.setTitle('标记为进行中').setIcon('loader').onClick(() => upd({ doing: true })));
+    }
+    if (!t.cancelled) {
+      menu.addItem(i => i.setTitle('标记为已取消').setIcon('ban')
+        .onClick(() => upd({ done: true, cancelled: true, doing: false })));
+    }
+    if (t.doing || t.done) {
+      menu.addItem(i => i.setTitle('恢复为未开始').setIcon('circle')
+        .onClick(() => upd({ done: false, cancelled: false, doing: false })));
+    }
   }
 
   editDay(t) {
@@ -2869,13 +4069,42 @@ class MatrixView extends ItemView {
     let overSlot = null;
     let overQuad = null;
     let dropIndex = 0;
+    let overGrid = null;
+    let dropBefore = null; // 周期任务排序：放到这张卡片前面；null 表示放到最后
+    let dropMark = null;
 
     const targetAt = ev => {
       const hit = doc.elementFromPoint(ev.clientX, ev.clientY);
       return {
         slot: hit && src.kind === 'day' ? hit.closest('.pm-slot') : null,
         quad: hit ? hit.closest('.pm-quad') : null,
+        grid: hit && src.kind === 'period' ? hit.closest('.pm-pgrid') : null,
       };
+    };
+
+    // 卡片网格按阅读顺序排：指针在某张卡片上方那一行，或者同一行里在它中线左边，就插到它前面
+    const pcards = () => [...this.pgrid.querySelectorAll('.pm-pcard[data-line]')];
+    const slotInGrid = ev => {
+      for (const c of pcards()) {
+        if (c === card) continue;
+        const b = c.getBoundingClientRect();
+        if (ev.clientY < b.top) return c;
+        if (ev.clientY <= b.bottom && ev.clientX < b.left + b.width / 2) return c;
+      }
+      return null;
+    };
+    const showGridMark = before => {
+      if (dropMark) dropMark.removeClass('is-drop-before', 'is-drop-after');
+      dropMark = null;
+      if (!overGrid) return;
+      const others = pcards().filter(c => c !== card);
+      if (before) {
+        dropMark = before;
+        before.addClass('is-drop-before');
+      } else if (others.length) {
+        dropMark = others[others.length - 1];
+        dropMark.addClass('is-drop-after');
+      }
     };
 
     const indexIn = (quad, y) => {
@@ -2893,6 +4122,7 @@ class MatrixView extends ItemView {
       if (line) line.remove();
       if (overSlot) overSlot.removeClass('is-over');
       if (overQuad) overQuad.removeClass('is-over');
+      if (dropMark) dropMark.removeClass('is-drop-before', 'is-drop-after');
       card.removeClass('is-dragsrc');
       if (this.board) this.board.removeClass('is-dragging');
       this.contentEl.removeClass('is-dragging');
@@ -2932,6 +4162,11 @@ class MatrixView extends ItemView {
         if (tgt.quad) tgt.quad.addClass('is-over');
         overQuad = tgt.quad;
       }
+      overGrid = tgt.grid;
+      if (src.kind === 'period') {
+        dropBefore = overGrid ? slotInGrid(ev) : null;
+        showGridMark(dropBefore);
+      }
       if (src.kind === 'day' && overQuad) {
         const { i, rows } = indexIn(overQuad, ev.clientY);
         dropIndex = i;
@@ -2956,10 +4191,21 @@ class MatrixView extends ItemView {
       const cancelled = ev.type !== 'pointerup';
       const slot = overSlot;
       const quad = overQuad;
+      const grid = overGrid;
+      const before = dropBefore;
+      const all = src.kind === 'period' ? pcards() : [];
       cleanup();
       this.dragging = false;
 
-      if (!cancelled && src.kind === 'period' && quad) {
+      if (!cancelled && src.kind === 'period' && grid) {
+        // 放回原处（紧挨着自己后面那张，或者本来就是最后一张）就什么都不写
+        const next = all[all.indexOf(card) + 1] || null;
+        if (before !== next) {
+          const bt = before ? this.periodTasks.find(t => String(t.line) === before.dataset.line) : null;
+          await this.plugin.movePeriodTask(this.file, src.task, bt);
+          return;
+        }
+      } else if (!cancelled && src.kind === 'period' && quad) {
         this.splitToDay(src.task, +quad.dataset.q);
       } else if (!cancelled && src.kind === 'day' && slot) {
         await this.plugin.updateTask(this.file, this.dayScope(), src.task, { slot: slot.dataset.slot });
@@ -2987,6 +4233,477 @@ class MatrixView extends ItemView {
     doc.addEventListener('pointerup', onUp);
     doc.addEventListener('pointercancel', onUp);
     doc.addEventListener('keydown', onKey, true);
+  }
+}
+
+// ---------- 工作助理（右侧边栏） ----------
+
+const ACTION_ICONS = { add: 'plus', addPeriod: 'flag', done: 'check', doing: 'loader', cancel: 'ban', move: 'move', slot: 'clock' };
+
+class AgentView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.chat = this.newChat();
+    this.busy = false;
+    this.abort = null;
+    this.briefBusy = false;
+    this.briefLive = '';
+    this.briefOpen = true;
+    this.draft = '';
+    this.live = null;
+    this.paintTimer = 0;
+    this.comp = null;
+  }
+
+  getViewType() {
+    return AGENT_VIEW;
+  }
+
+  getDisplayText() {
+    return '工作助理';
+  }
+
+  getIcon() {
+    return 'bot';
+  }
+
+  get settings() {
+    return this.plugin.settings;
+  }
+
+  newChat() {
+    return { title: '新对话', created: zoneNow().format('YYYY-MM-DD HH:mm'), messages: [], file: null };
+  }
+
+  async onOpen() {
+    this.contentEl.addClass('pm-agent');
+    this.registerEvent(this.app.workspace.on('css-change', () => this.render()));
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.fitStatusBar()));
+    this.registerEvent(this.app.workspace.on('resize', () => this.fitStatusBar()));
+    this.registerDomEvent(window, 'resize', () => this.fitStatusBar());
+    this.registerDomEvent(this.contentEl, 'click', e => {
+      const a = e.target.closest && e.target.closest('a');
+      if (!a) return;
+      e.preventDefault();
+      if (a.hasClass('internal-link')) this.app.workspace.openLinkText(a.getAttr('data-href') || a.getAttr('href'), '', 'tab');
+      else if (a.href) window.open(a.href);
+    });
+    this.render();
+  }
+
+  async onClose() {
+    if (this.abort) this.abort.abort();
+    window.clearTimeout(this.paintTimer);
+  }
+
+  linkPath() {
+    const p = this.plugin.periodFor(zoneNow());
+    return p ? p.file.path : '';
+  }
+
+  render() {
+    const el = this.contentEl;
+    el.empty();
+    applySkin(el, this.plugin);
+    el.removeClass('pm-space');
+    if (this.comp) this.removeChild(this.comp);
+    this.comp = this.addChild(new Component());
+    this.live = null;
+    this.buildBar(el);
+    this.listEl = el.createDiv('pm-ag-list');
+    this.renderList();
+    this.buildComposer(el);
+    window.requestAnimationFrame(() => this.fitStatusBar());
+  }
+
+  // Obsidian 的状态栏浮在窗口右下角，会盖住输入框：重叠多少，输入区底部就多留多少
+  fitStatusBar() {
+    const box = this.composerEl;
+    if (!box || !box.isConnected) return;
+    const sb = document.body.querySelector('.status-bar');
+    let pad = 0;
+    if (sb && sb.offsetParent !== null) {
+      const a = sb.getBoundingClientRect();
+      const b = this.contentEl.getBoundingClientRect();
+      if (a.height && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top) pad = Math.ceil(b.bottom - a.top) + 6;
+    }
+    box.style.paddingBottom = pad ? `calc(0.75em + ${pad}px)` : '';
+  }
+
+  // ----- 顶栏：模型、推理强度、历史、新对话 -----
+
+  buildBar(el) {
+    const bar = el.createDiv('pm-ag-bar');
+    const sel = bar.createEl('select', { cls: 'pm-select is-small pm-ag-model' });
+    for (const m of AGENT_MODELS) sel.createEl('option', { value: m.id, text: m.label });
+    if (!AGENT_MODELS.some(m => m.id === this.settings.agentModel)) {
+      sel.createEl('option', { value: this.settings.agentModel, text: this.settings.agentModel });
+    }
+    sel.value = this.settings.agentModel;
+    sel.onchange = async () => {
+      this.settings.agentModel = sel.value;
+      await this.plugin.saveData(this.settings);
+    };
+    const seg = bar.createDiv({ cls: 'pm-seg pm-ag-effort', attr: { role: 'group', 'aria-label': '推理强度' } });
+    for (const [k, label] of EFFORTS) {
+      const b = seg.createEl('button', { cls: 'pm-zone-btn' + (this.settings.agentEffort === k ? ' is-on' : ''), text: label });
+      b.title = `推理强度：${label}。越高想得越久，也更贵`;
+      b.onclick = async () => {
+        this.settings.agentEffort = k;
+        seg.querySelectorAll('button').forEach(x => x.toggleClass('is-on', x === b));
+        await this.plugin.saveData(this.settings);
+      };
+    }
+    bar.createDiv('pm-spacer');
+    iconBtn(bar, 'history', '历史对话').onclick = e => this.historyMenu(e);
+    iconBtn(bar, 'square-pen', '新对话').onclick = () => {
+      if (this.busy) return;
+      this.chat = this.newChat();
+      this.render();
+    };
+  }
+
+  historyMenu(e) {
+    const menu = new Menu();
+    const files = this.plugin.listChats().slice(0, 20);
+    if (!files.length) menu.addItem(i => i.setTitle('还没有保存的对话').setDisabled(true));
+    for (const f of files) {
+      menu.addItem(i => i.setTitle(f.basename).setIcon('message-square').setChecked(!!this.chat.file && this.chat.file.path === f.path)
+        .onClick(() => this.load(f)));
+    }
+    if (this.chat.file) {
+      menu.addSeparator();
+      menu.addItem(i => i.setTitle('打开当前对话的笔记').setIcon('file-text')
+        .onClick(() => this.app.workspace.getLeaf('tab').openFile(this.chat.file)));
+    }
+    menu.showAtMouseEvent(e);
+  }
+
+  async load(f) {
+    if (this.busy) return;
+    const c = parseChat(await this.app.vault.read(f));
+    this.chat = Object.assign(c, { file: f });
+    if (!this.chat.created) this.chat.created = moment(f.stat.ctime).format('YYYY-MM-DD HH:mm');
+    this.render();
+  }
+
+  async save() {
+    if (!this.chat.messages.length) return;
+    try {
+      await this.plugin.saveChat(this.chat);
+    } catch (e) {
+      console.error('[workmap] 保存对话失败', e);
+    }
+  }
+
+  // ----- 简报和消息列表 -----
+
+  renderList() {
+    const list = this.listEl;
+    list.empty();
+    this.buildBrief(list);
+    if (!this.chat.messages.length) this.buildWelcome(list);
+    this.chat.messages.forEach(m => list.appendChild(this.bubble(m)));
+    window.setTimeout(() => { list.scrollTop = list.scrollHeight; }, 0);
+  }
+
+  buildBrief(parent) {
+    const today = zoneNow().format('YYYY-MM-DD');
+    const b = this.settings.brief && this.settings.brief.date === today ? this.settings.brief : null;
+    const card = parent.createDiv('pm-ag-brief');
+    const head = card.createDiv('pm-ag-brief-head');
+    setIcon(head.createSpan('pm-ag-brief-icon'), 'sun');
+    head.createSpan({ cls: 'pm-ag-brief-title', text: '今日简报' });
+    if (b && !this.briefBusy) head.createSpan({ cls: 'pm-ag-meta', text: `${b.at} · ${agentModel(b.model).label}` });
+    head.createDiv('pm-spacer');
+    if (b && !this.briefBusy) {
+      iconBtn(head, this.briefOpen ? 'chevron-up' : 'chevron-down', this.briefOpen ? '收起' : '展开').onclick = () => {
+        this.briefOpen = !this.briefOpen;
+        this.renderList();
+      };
+    }
+    const btn = textBtn(head, this.briefBusy ? '生成中…' : b ? '刷新' : '生成', 'is-ghost', 'sparkles');
+    btn.disabled = this.briefBusy || this.busy;
+    btn.onclick = () => this.makeBrief();
+    const body = card.createDiv('pm-ag-brief-body pm-text');
+    this.briefBody = body;
+    if (this.briefBusy) {
+      if (this.briefLive) renderMd(this.app, this.briefLive, body, this.linkPath(), this.comp);
+      else body.createDiv({ cls: 'pm-ag-hint is-wait', text: '正在读今天、昨天的任务和本期笔记…' });
+    } else if (b) {
+      if (this.briefOpen) renderMd(this.app, b.text, body, this.linkPath(), this.comp);
+      else card.addClass('is-folded');
+    } else {
+      body.createDiv({ cls: 'pm-ag-hint', text: '点「生成」，总结今天和昨天的任务、主线进展和最近的笔记，并给出今天先做的一件事。' });
+    }
+  }
+
+  async makeBrief() {
+    if (this.briefBusy || this.busy) return;
+    const model = this.settings.agentModel;
+    this.briefBusy = true;
+    this.briefLive = '';
+    this.briefOpen = true;
+    this.renderList();
+    try {
+      const context = await this.plugin.agentContextFor({ today: true, yesterday: true, period: true, notes: true });
+      const r = await this.plugin.streamChat({
+        model,
+        effort: this.settings.agentEffort,
+        system: agentSystem(this.settings.slots, context),
+        messages: [{ role: 'user', content: AGENT_BRIEF_PROMPT }],
+        onDelta: acc => {
+          this.briefLive = visibleReply(acc.text);
+          this.paint(() => {
+            this.briefBody.empty();
+            return renderMd(this.app, this.briefLive, this.briefBody, this.linkPath(), this.comp);
+          });
+        },
+      });
+      this.settings.brief = { date: zoneNow().format('YYYY-MM-DD'), at: zoneNow().format('HH:mm'), model, text: parseActions(r.text).text, usage: r.usage };
+      await this.plugin.saveData(this.settings);
+    } catch (e) {
+      new Notice(`简报生成失败：${e.message || e}`, 10000);
+    } finally {
+      this.briefBusy = false;
+      this.render();
+    }
+  }
+
+  buildWelcome(parent) {
+    const w = parent.createDiv('pm-ag-welcome');
+    w.createDiv({ cls: 'pm-ag-welcome-title', text: '有什么要我帮忙的？' });
+    w.createDiv({
+      cls: 'pm-ag-hint',
+      text: '我能看到下面勾选的内容（今天、昨天的任务，本期主线和笔记），每次提问都会重新读一遍笔记。需要改任务时我会给出建议，你点「确认」才会写进笔记。',
+    });
+  }
+
+  bubble(m) {
+    const el = createDiv({ cls: `pm-ag-msg is-${m.role}` });
+    if (m.role === 'user') {
+      el.createDiv({ cls: 'pm-ag-user', text: m.content });
+      return el;
+    }
+    const think = el.createEl('details', { cls: 'pm-ag-think' });
+    const sum = think.createEl('summary', { text: m.pending && !m.content ? '思考中…' : '思考过程' });
+    const thinkBody = think.createDiv({ cls: 'pm-ag-think-body', text: m.thinking || '' });
+    if (!m.thinking) think.hide();
+    const body = el.createDiv('pm-ag-body pm-text');
+    if (m.pending) {
+      if (m.content) renderMd(this.app, visibleReply(m.content), body, this.linkPath(), this.comp);
+      else body.createDiv({ cls: 'pm-ag-dots' }).createSpan({ text: '···' });
+      this.live = { body, think, sum, thinkBody };
+      return el;
+    }
+    renderMd(this.app, m.content || '', body, this.linkPath(), this.comp);
+    this.buildActions(el, m);
+    const meta = el.createDiv('pm-ag-meta');
+    const u = m.usage;
+    meta.setText([m.model, m.time, u && u.output != null ? `${u.input || 0} → ${u.output} tokens` : '', u && u.cost ? u.cost : ''].filter(Boolean).join(' · '));
+    const copy = meta.createSpan({ cls: 'pm-ag-copy', text: '复制' });
+    copy.onclick = async () => {
+      await navigator.clipboard.writeText(m.content || '');
+      copy.setText('已复制');
+    };
+    return el;
+  }
+
+  // 流式输出时最多 100ms 重画一次
+  paint(fn) {
+    if (this.paintTimer) return;
+    this.paintTimer = window.setTimeout(async () => {
+      this.paintTimer = 0;
+      const list = this.listEl;
+      const atBottom = list && list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+      await fn();
+      if (list && atBottom) list.scrollTop = list.scrollHeight;
+    }, 100);
+  }
+
+  paintLive(m) {
+    this.paint(() => {
+      const live = this.live;
+      if (!live) return null;
+      if (m.thinking) {
+        live.think.show();
+        live.thinkBody.setText(m.thinking);
+        live.sum.setText(m.content ? '思考过程' : '思考中…');
+      }
+      if (!m.content) return null;
+      live.body.empty();
+      return renderMd(this.app, visibleReply(m.content), live.body, this.linkPath(), this.comp);
+    });
+  }
+
+  // ----- 建议的改动 -----
+
+  buildActions(el, m) {
+    if (!m.actions || !m.actions.length) return;
+    const box = el.createDiv('pm-ag-actions');
+    const head = box.createDiv('pm-ag-actions-head');
+    head.createSpan({ text: `建议的改动 · ${m.actions.length} 项` });
+    head.createDiv('pm-spacer');
+    const pending = m.actions.filter(a => !a.state || a.state === 'error');
+    if (pending.length > 1) textBtn(head, '全部确认', 'is-primary').onclick = () => this.runActions(m, pending);
+    for (const a of m.actions) {
+      const row = box.createDiv('pm-ag-act' + (a.state ? ` is-${a.state}` : ''));
+      setIcon(row.createSpan('pm-ag-act-icon'), ACTION_ICONS[a.op] || 'dot');
+      const txt = row.createDiv('pm-ag-act-text');
+      txt.createSpan({ text: describeAction(a) });
+      if (a.state === 'error') txt.createDiv({ cls: 'pm-ag-act-err', text: a.error || '失败' });
+      if (a.state === 'done') row.createSpan({ cls: 'pm-ag-act-state', text: '已执行' });
+      else if (a.state === 'skip') row.createSpan({ cls: 'pm-ag-act-state', text: '已忽略' });
+      else {
+        iconBtn(row, 'check', '确认', 'pm-ag-ok').onclick = () => this.runActions(m, [a]);
+        iconBtn(row, 'x', '忽略').onclick = async () => {
+          a.state = 'skip';
+          await this.save();
+          this.renderList();
+        };
+      }
+    }
+  }
+
+  async runActions(m, list) {
+    let ok = 0;
+    for (const a of list) {
+      try {
+        await this.plugin.applyAction(a);
+        a.state = 'done';
+        delete a.error;
+        ok++;
+      } catch (e) {
+        a.state = 'error';
+        a.error = e.message || String(e);
+      }
+    }
+    await this.save();
+    this.renderList();
+    if (ok) new Notice(`已执行 ${ok} 项改动。在 Workmap 里按 ⌘Z 可以逐项撤销`);
+  }
+
+  // ----- 输入区 -----
+
+  buildComposer(el) {
+    const box = el.createDiv('pm-ag-composer');
+    this.composerEl = box;
+    let ta = null;
+    const chips = box.createDiv('pm-ag-quick');
+    for (const [label, text] of AGENT_QUICK) {
+      const c = chips.createEl('button', { cls: 'pm-ag-chip', text: label });
+      c.disabled = this.busy;
+      c.onclick = () => {
+        const hole = text.indexOf('「」');
+        if (hole < 0) {
+          this.send(text);
+          return;
+        }
+        ta.value = text;
+        this.draft = text;
+        ta.focus();
+        ta.setSelectionRange(hole + 1, hole + 1);
+        fit();
+      };
+    }
+    const ctx = box.createDiv('pm-ag-ctx');
+    ctx.createSpan({ cls: 'pm-ag-ctx-label', text: '带上' });
+    const flags = this.settings.agentCtx;
+    for (const [k, label] of AGENT_CTX) {
+      const b = ctx.createEl('button', { cls: 'pm-ag-ctxbtn' + (flags[k] ? ' is-on' : ''), text: label });
+      b.onclick = async () => {
+        flags[k] = !flags[k];
+        b.toggleClass('is-on', flags[k]);
+        await this.plugin.saveData(this.settings);
+      };
+    }
+    const row = box.createDiv('pm-ag-inputrow');
+    ta = row.createEl('textarea', { cls: 'pm-ag-input', attr: { rows: '1', placeholder: '问点什么，或者让我帮你安排今天…（Shift+回车换行）' } });
+    ta.value = this.draft;
+    const fit = () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
+    };
+    ta.oninput = () => {
+      this.draft = ta.value;
+      fit();
+    };
+    ta.addEventListener('keydown', e => {
+      if (isSubmitKey(e) && !e.shiftKey) {
+        e.preventDefault();
+        this.send(ta.value);
+      }
+    });
+    const btn = iconBtn(row, this.busy ? 'square' : 'arrow-up', this.busy ? '停止' : '发送', 'pm-ag-send' + (this.busy ? ' is-stop' : ''));
+    btn.onclick = () => (this.busy ? this.abort && this.abort.abort() : this.send(ta.value));
+    window.setTimeout(fit, 0);
+    this.inputEl = ta;
+  }
+
+  async send(raw) {
+    const text = (raw || '').trim();
+    if (!text || this.busy || this.briefBusy) return;
+    if (!this.settings.aiKey) {
+      new Notice('先在设置 → Workmap → 大模型里填写 API 密钥');
+      return;
+    }
+    const model = this.settings.agentModel;
+    const now = zoneNow();
+    if (!this.chat.messages.length) {
+      this.chat.title = chatTitle(text);
+      this.chat.created = now.format('YYYY-MM-DD HH:mm');
+    }
+    this.chat.messages.push({ role: 'user', content: text, time: now.format('HH:mm') });
+    const reply = { role: 'assistant', content: '', thinking: '', model: agentModel(model).label, time: now.format('HH:mm'), actions: [], pending: true };
+    this.chat.messages.push(reply);
+    this.draft = '';
+    this.busy = true;
+    this.abort = new AbortController();
+    this.render();
+    try {
+      const context = await this.plugin.agentContextFor(this.settings.agentCtx);
+      // 历史消息：只带正文；建议过的改动用一句话带上，模型才知道之前说过什么
+      const history = this.chat.messages
+        .filter(m => m !== reply && (m.content || '').trim())
+        .slice(-20)
+        .map(m => ({
+          role: m.role,
+          content: m.role === 'assistant' && m.actions && m.actions.length
+            ? `${m.content}\n\n（我建议过：${m.actions.map(a => describeAction(a) + (a.state === 'done' ? '，已执行' : a.state === 'skip' ? '，被忽略' : '')).join('；')}）`
+            : m.content,
+        }));
+      const r = await this.plugin.streamChat({
+        model,
+        effort: this.settings.agentEffort,
+        system: agentSystem(this.settings.slots, context),
+        messages: history,
+        signal: this.abort.signal,
+        onDelta: acc => {
+          reply.content = acc.text;
+          reply.thinking = acc.thinking;
+          this.paintLive(reply);
+        },
+      });
+      const parsed = parseActions(r.text);
+      reply.content = parsed.text;
+      reply.actions = parsed.actions;
+      reply.thinking = r.thinking;
+      reply.usage = r.usage;
+    } catch (e) {
+      const sofar = visibleReply(reply.content);
+      reply.content = e.name === 'AbortError'
+        ? `${sofar}\n\n*（已停止）*`.trim()
+        : `${sofar ? sofar + '\n\n' : ''}> [!error] 请求失败\n> ${e.message || e}`;
+    } finally {
+      delete reply.pending;
+      this.busy = false;
+      this.abort = null;
+      window.clearTimeout(this.paintTimer);
+      this.paintTimer = 0;
+      await this.save();
+      this.render();
+    }
   }
 }
 
@@ -3224,63 +4941,30 @@ class SlotModal extends SkinModal {
   }
 }
 
-class HabitModal extends SkinModal {
-  constructor(plugin) {
+class NameModal extends SkinModal {
+  constructor(plugin, title, sub, onSubmit) {
     super(plugin);
-    this.list = [...plugin.settings.habits];
+    this.title = title;
+    this.sub = sub;
+    this.onSubmit = onSubmit;
   }
 
   onOpen() {
-    this.draw();
-  }
-
-  draw(focus) {
-    this.skin('每日习惯', '每天都想坚持的事，比如健身、阅读、冥想。可以加 emoji，顺序就是显示顺序。');
-    const box = this.contentEl.createDiv('pm-hlist');
-    this.list.forEach((h, i) => {
-      const row = box.createDiv('pm-hrow');
-      row.createSpan({ cls: 'pm-hrow-idx', text: String(i + 1) });
-      const inp = row.createEl('input', { type: 'text', cls: 'pm-input' });
-      inp.value = h;
-      inp.placeholder = '例如：🏃 健身 30 分钟';
-      inp.oninput = () => { this.list[i] = inp.value; };
-      inp.addEventListener('keydown', e => {
-        if (isSubmitKey(e)) {
-          this.list.splice(i + 1, 0, '');
-          this.draw(i + 1);
-        }
-      });
-      if (focus === i) window.setTimeout(() => inp.focus(), 0);
-      const up = iconBtn(row, 'arrow-up', '上移');
-      up.disabled = i === 0;
-      up.onclick = () => {
-        [this.list[i - 1], this.list[i]] = [this.list[i], this.list[i - 1]];
-        this.draw();
-      };
-      const down = iconBtn(row, 'arrow-down', '下移');
-      down.disabled = i === this.list.length - 1;
-      down.onclick = () => {
-        [this.list[i + 1], this.list[i]] = [this.list[i], this.list[i + 1]];
-        this.draw();
-      };
-      iconBtn(row, 'x', '删除', 'is-danger').onclick = () => {
-        this.list.splice(i, 1);
-        this.draw();
-      };
+    this.skin(this.title, this.sub);
+    const input = this.field('标题').createEl('input', { type: 'text', cls: 'pm-input is-lg' });
+    input.placeholder = '例如：控制回路与串级控制';
+    input.addEventListener('keydown', e => {
+      if (isSubmitKey(e)) this.submit(input.value);
     });
-    textBtn(this.contentEl, '添加习惯', 'is-ghost pm-hadd', 'plus').onclick = () => {
-      this.list.push('');
-      this.draw(this.list.length - 1);
-    };
-    this.contentEl.createDiv({ cls: 'pm-modal-note', text: '改名或删除只影响之后的打卡，以前写在笔记里的记录不会变。' });
-    this.footer('保存', () => this.save());
+    window.setTimeout(() => input.focus(), 0);
+    this.footer('创建', () => this.submit(input.value));
   }
 
-  async save() {
-    const clean = [...new Set(this.list.map(s => s.replace(/[✅⬜]/g, '').trim()).filter(Boolean))];
-    this.plugin.settings.habits = clean;
-    await this.plugin.saveSettings();
+  submit(v) {
+    const text = v.trim();
+    if (!text) return;
     this.close();
+    this.onSubmit(text);
   }
 }
 
@@ -3434,23 +5118,88 @@ class MatrixSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       }));
     new Setting(containerEl)
-      .setName('每日习惯')
-      .setDesc(s.habits.join('、') || '还没有设置')
-      .addButton(b => b.setButtonText('编辑').onClick(() => {
-        const m = new HabitModal(this.plugin);
-        const close = m.onClose.bind(m);
-        m.onClose = () => {
-          close();
-          this.display();
-        };
-        m.open();
+      .setName('顺延起点')
+      .setDesc('早于这一天的任务不再自动顺延，格式 YYYY-MM-DD。留空则只顺延上一期和本期的任务。')
+      .addText(tc => tc.setPlaceholder('例如 2026-11-18').setValue(s.carryStart || '').onChange(async v => {
+        v = v.trim();
+        if (v && !parseDate(v)) return;
+        s.carryStart = v;
+        await this.plugin.saveData(s);
       }));
+    new Setting(containerEl)
+      .setName('顺延后的原任务')
+      .setDesc('没做完的任务每天会自动顺延到今天。原来那天的那一行保留为 [>]（能看到每天的记录），还是直接删掉（笔记更干净）。两种方式都会记下最初安排的日期，用来显示「已拖 N 天」。')
+      .addDropdown(dd => dd
+        .addOption('mark', '保留，标成 [>]')
+        .addOption('move', '删掉')
+        .setValue(s.carryMode === 'move' ? 'move' : 'mark')
+        .onChange(async v => {
+          s.carryMode = v;
+          await this.plugin.saveSettings();
+        }));
     new Setting(containerEl)
       .setName('日程时段')
       .setDesc('格式如 07-09，用英文逗号分隔')
       .addText(tc => tc.setValue(s.slots.join(',')).onChange(async v => {
         s.slots = v.split(',').map(x => x.trim()).filter(Boolean);
         await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl).setName('大模型（AI 回顾 / 出题）').setHeading();
+    containerEl.createDiv({
+      cls: 'setting-item-description',
+      text: '通过 DMXAPI 调用模型。点「AI 回顾」或「AI 出题」时，本期的任务和笔记内容会发送给 DMXAPI 和所选模型的提供方；密钥只存在本机的插件设置（data.json）里。',
+    });
+    new Setting(containerEl)
+      .setName('API 密钥')
+      .setDesc('在 DMXAPI 控制台「API 令牌」里创建，形如 sk-…')
+      .addText(tc => {
+        tc.inputEl.type = 'password';
+        tc.setPlaceholder('sk-…').setValue(s.aiKey || '').onChange(async v => {
+          s.aiKey = v.trim();
+          await this.plugin.saveData(s);
+        });
+      });
+    const preset = AI_MODELS.some(m => m[0] === s.aiModel);
+    new Setting(containerEl)
+      .setName('模型')
+      .setDesc('回顾和出题用哪个模型。选「其他」可以填 DMXAPI 上的任意模型名')
+      .addDropdown(dd => {
+        for (const [id, label] of AI_MODELS) dd.addOption(id, label);
+        dd.addOption('__custom', '其他…');
+        dd.setValue(preset ? s.aiModel : '__custom').onChange(async v => {
+          if (v !== '__custom') s.aiModel = v;
+          await this.plugin.saveData(s);
+          this.display();
+        });
+      });
+    if (!preset) {
+      new Setting(containerEl)
+        .setName('模型名')
+        .addText(tc => tc.setPlaceholder('例如 qwen3.8-max').setValue(s.aiModel || '').onChange(async v => {
+          s.aiModel = v.trim();
+          await this.plugin.saveData(s);
+        }));
+    }
+    new Setting(containerEl)
+      .setName('接口地址')
+      .setDesc('一般不用改')
+      .addText(tc => tc.setPlaceholder(DEFAULT_SETTINGS.aiBase).setValue(s.aiBase || '').onChange(async v => {
+        s.aiBase = v.trim() || DEFAULT_SETTINGS.aiBase;
+        await this.plugin.saveData(s);
+      }))
+      .addButton(b => b.setButtonText('测试连接').onClick(async () => {
+        b.setDisabled(true);
+        b.setButtonText('测试中…');
+        try {
+          const r = await this.plugin.chat('只回复「连接正常」四个字。', 'ping');
+          new Notice(`${r.model}：${r.text}`);
+        } catch (e) {
+          new Notice(`连接失败：${e.message || e}`, 10000);
+        } finally {
+          b.setDisabled(false);
+          b.setButtonText('测试连接');
+        }
       }));
   }
 }
@@ -3466,16 +5215,14 @@ module.exports._test = {
   taskBlock,
   ensureDay,
   insertTaskBlock,
-  parseHabits,
-  formatHabits,
+  moveTaskBlock,
   quadOf,
   quadList,
   spreadY,
   endPos,
   reorderPatches,
-  habitStreak,
   heatOf,
-  longestStreak,
+  longestRun,
   periodStats,
   hashStr,
   rng,
@@ -3493,6 +5240,35 @@ module.exports._test = {
   noteLines,
   collectCarry,
   markCarried,
+  unmarkCarried,
+  chainOrigin,
+  carryAge,
+  notesRange,
+  listNoteLinks,
+  ensureNotesSection,
+  noteLinkLine,
+  addNoteLink,
+  strayBlocks,
+  strayTitle,
+  safeFileName,
+  takeStray,
+  periodDigest,
+  dayDigest,
+  agentModel,
+  buildChatRequest,
+  sseSplit,
+  streamDelta,
+  replyOf,
+  parseActions,
+  visibleReply,
+  describeAction,
+  matchTask,
+  formatChat,
+  parseChat,
+  chatTitle,
+  agentContext,
+  agentSystem,
+  httpErrorText,
   isSubmitKey,
   periodProblem,
   suggestPeriod,

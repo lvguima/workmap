@@ -4,7 +4,7 @@
 
 ## 1. 目标与原则
 
-1. **md 是唯一的数据源。** 任务、位置、日程、打卡全部写在时段笔记里，插件不另存任务数据。关掉插件，笔记照样能读，也能用别的工具处理。以后让大模型读笔记做总结、出题，用的也是同一份文件。
+1. **md 是唯一的数据源。** 任务、位置、日程全部写在时段笔记里，插件不另存任务数据。关掉插件，笔记照样能读，也能用别的工具处理。大模型回顾、出题读的也是同一份文件。
 2. **双向同步。** 视图里的操作立刻写回 md；在编辑器里改 md，视图也会自动刷新。
 3. **格式对人友好。** 任务就是标准的 `- [ ]`。元数据放在 `%%…%%` 注释里，阅读模式下不显示，实时预览中由编辑器扩展隐藏。星标和截止日期用人能直接看懂的 `★`、`📅`。
 4. **不需要构建。** 只有一个 CommonJS 文件 `main.js`，直接用 Obsidian 提供的 API 和 `moment`。改完重启即可，方便随手改。
@@ -28,31 +28,34 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
 （任意前言，比如打开视图的链接）
 ## 周期任务        ← periodRange：到第一个 --- 或一、二级标题为止
 - [ ] …
+## 本期笔记        ← notesRange：每行一个 [[链接]]
+- [[2026/11/18-30/某篇笔记|某篇笔记]]
 ---
 ## 19             ← listDays / dayRange：到下一个一、二级标题为止
-习惯：✅… ⬜…
 - [ ] …
 ## 18
 …
 ```
 
 - 用 `ensureDay(lines, day)` 定位或新建某天的小节。新建时插在第一个「日期更小」的小节前面，所以新的一天在上面。
-- 新任务通过 `insertTaskBlock` 加入当天：先替换空的 `- [ ]` 占位行；没有的话，接在最后一个任务（及其备注）后面；当天还没有任务时，放在习惯行之后。
+- 新任务通过 `insertTaskBlock` 加入当天：先替换空的 `- [ ]` 占位行；没有的话，接在最后一个任务（及其备注）后面；当天还没有任务时，放在小节开头（旧笔记里的 `习惯：` 行之后）。
 
 ### 2.3 任务行
 
 `parseTaskLine` 把一行解析成：
 
 ```js
-{ line, raw, done, text, level, due, x, y, id, parent, slot }
+{ line, raw, done, cancelled, doing, text, level, due, x, y, id, parent, slot, since }
 ```
+
+状态：`[ ]` 未开始，`[/]` 进行中（`doing`），`[x]` 完成，`[-]` 已取消（`done` 和 `cancelled` 都为真）。`[>]` 是已顺延，不算任务。
 
 解析顺序：先剥掉 `%%k:v%%` 元数据，再取出 `📅 日期` 和 `★` 星标，剩下的就是 `text`。整行加粗的 `**text**` 按三星处理（兼容旧笔记）。
 
 `formatTask` 按固定顺序写回：
 
 ```
-- [ ] 文本 ★★ 📅 YYYY-MM-DD %%id:…%% %%p:…%% %%t:…%% %%m:x,y%%
+- [ ] 文本 ★★ 📅 YYYY-MM-DD %%id:…%% %%p:…%% %%t:…%% %%c:…%% %%m:x,y%%
 ```
 
 任务下方的缩进行（`countChildren`）是备注。`collectTasks` 读取时会去掉公共缩进；`noteLines` 写回时统一缩进两个空格。
@@ -83,21 +86,31 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
 
 周期任务第一次被关联时，`ensurePeriodId` 给它分配 `%%id:pxxxx%%`（`p` 加 4 位随机字符）。每日任务用 `%%p:pxxxx%%` 指向它。进度 = 所有关联每日任务中完成的个数 / 总数，统计范围是当前这份笔记的所有日子。
 
-### 2.6 习惯
+### 2.6 本期笔记
 
-当天小节里有一行 `习惯：✅A ⬜B`。名称是两个标记之间的文本，所以可以带空格和 emoji。`formatHabits` 按设置里的习惯顺序重写整行。不在设置里的旧习惯不会显示，但打卡记录仍留在旧的日子里。连续天数由 `habitStreak` 从当天往前数；当天没打卡就从昨天开始数，避免一早打开就显示断了。
+长内容单独存成文件，放在 `年/月/起-止/`（和时段笔记同名的文件夹），时段笔记的 `## 本期笔记` 里每行一个链接。这样笔记里的标题和 `---` 不会打乱时段笔记。
+
+- `notesOf` 列出本期笔记：先是小节里的链接（按顺序），再是文件夹里没登记的文件。
+- `strayBlocks` 找出不属于前言、周期任务、本期笔记、任何一天的内容（通常是直接粘贴进来的），`takeStray` 把它们拿出来，`archiveStray` 存成新文件并换成链接。
+- AI 生成的笔记带 `workmap: ai-review` / `ai-quiz` 属性，再生成时不会喂回去。
 
 ### 2.7 插件设置（`data.json`）
 
 ```js
 {
-  hideDone, habits, slots, theme, size,
+  hideDone, slots, theme, size,
   hideTips,                 // 操作提示是否已关闭
   fx,                       // 趣味动画开关
   sky,                      // 星空背景开关
   zone, usZone,             // 所选时区（us / hk / paris，空表示系统时间）和美国的具体时区
   carryHold,                // 切时区跳到的新日期：这一天先不自动顺延
-  carry: { date, dismissed, items: [{ raw, text, from }] }  // 当天的顺延记录
+  carryStart,               // 顺延起点 YYYY-MM-DD，早于它的不顺延；空 = 只看上一期
+  carryMode,                // 顺延后原行：mark 改成 [>]，move 删掉
+  carry: { date, dismissed, items: [{ raw, text, from, since }] },  // 当天的顺延记录
+  aiKey, aiBase, aiModel,   // DMXAPI 密钥、接口地址、AI 回顾 / 出题用的模型
+  agentModel, agentEffort,  // 工作助理的模型和推理强度
+  agentCtx,                 // 工作助理带上哪些内容：{ today, yesterday, period, notes }
+  brief,                    // 今日简报缓存：{ date, at, model, text, usage }
 }
 ```
 
@@ -108,12 +121,13 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
 | 部分 | 内容 |
 | --- | --- |
 | 常量 | 正则、默认设置、`QUADS`、默认模板 |
-| 编辑器扩展 | CodeMirror `MatchDecorator`，只在实时预览中隐藏 `%%m/p/t/id%%` |
-| 纯函数 | 解析与格式化、范围定位、插入、象限计算、习惯统计、日期工具。不依赖 DOM，都导出在 `module.exports._test` 中供测试 |
+| 编辑器扩展 | CodeMirror `MatchDecorator`，只在实时预览中隐藏 `%%m/p/t/id/c%%` |
+| 纯函数 | 解析与格式化、范围定位、插入、象限计算、顺延、本期笔记、大模型摘要（`periodDigest`）、日期工具。不依赖 DOM，都导出在 `module.exports._test` 中供测试 |
 | UI 小部件 | `applySkin`、`iconBtn`、`textBtn`、`buildCheck`、`buildStars`、`buildDatePicker` |
-| `WorkmapPlugin` | 生命周期、命令、写回（`mutate` / `updateTask` / `updateMany` / `add*`）、撤销、自动顺延、新建一期 |
+| `WorkmapPlugin` | 生命周期、命令、写回（`mutate` / `updateTask` / `updateMany` / `add*`）、撤销、自动顺延、周期任务排序、本期笔记、调用大模型（`chat` / `runAI`）、新建一期 |
 | `MatrixView` | 视图：渲染各区域、交互、拖拽、提示条 |
-| 弹窗 | `SkinModal` 基类，以及 `TaskModal`、`PromptModal`、`SlotModal`、`HabitModal`、`NewPeriodModal` |
+| `AgentView` | 右侧边栏的工作助理：简报、对话、改动卡片 |
+| 弹窗 | `SkinModal` 基类，以及 `TaskModal`、`PromptModal`、`SlotModal`、`NameModal`、`NewPeriodModal` |
 | `MatrixSettingTab` | 设置页 |
 
 `styles.css` 的所有选择器都挂在 `.pm-skin` 下（视图、弹窗、拖拽副本、提示条都会加这个类）。颜色和尺寸用 CSS 变量定义，`.pm-light` / `.pm-dark` 两套。字号由 `applySkin` 写到容器上，内部一律用 `em`，所以「界面字号」一个设置就能整体缩放。
@@ -143,7 +157,7 @@ app.vault.process(file, data => {
 
 `mutate` 默认会把 `{ file, before, after }` 记进 `plugin.history`（最多 30 条）。`undo()` 取出最后一条：只有当文件内容仍然等于 `after` 时，才恢复成 `before`；否则清空历史并提示，绝不覆盖外部修改。
 
-自动顺延、跳到今天这类系统自动做的改动用 `record = false`，不进入撤销历史，避免 ⌘Z 撤销掉用户没意识到的操作。
+自动顺延、跳到今天、整理游离内容这类自动做的改动不进入撤销历史，避免 ⌘Z 撤销掉用户没意识到的操作。它们会记在 `autoWrites` 里，撤销因此失败时提示里会说明原因。
 
 ### 4.3 渲染与刷新
 
@@ -170,10 +184,10 @@ app.vault.process(file, data => {
 
 视图跟随今天、渲染今天时调用 `carryOver(today)`（用 `carrying` 标志防止重入）：
 
-1. `collectCarry` 扫描上一期和本期里日期早于今天的每一天，收集未完成的任务块（任务行和备注）。顺延时清掉日程时段，因为时段只对当天有意义。
-2. 在本期今天的小节插入这些块；`markCarried` 把原来的行改成 `- [>]`，这样它们不再被当成未完成，也不会重复顺延。
+1. `collectCarry` 扫描本期和上一期（设了 `carryStart` 时改为起点之后的各期，且早于起点的日子不管）里日期早于今天的每一天，收集未完成的任务块（任务行和备注）。顺延时清掉日程时段，因为时段只对当天有意义；同时写上 `%%c:最初日期%%`。旧任务没有 `c` 时，`chainOrigin` 顺着前面连续几天同名的 `[>]` 往回找。视图用 `carryAge` 显示「已拖 N 天」。
+2. 在本期今天的小节插入这些块；`markCarried` 把原来的行改成 `- [>]`（`carryMode = move` 时直接删掉），这样它们不会重复顺延。
    - 收集和标记在同一次 `vault.process` 里完成（上一期一次，本期一次，本期那次同时插入）。如果分成「先 read、再写」两步，中间笔记被改过时原行可能标不上，下次就会重复顺延。
-   - 先处理上一期，再写本期。写本期失败时，把上一期标上的 `[>]` 改回去，任务不会丢。
+   - 先处理更早的各期，再写本期。写本期失败时，`unmarkCarried` 把更早各期的改动还原，任务不会丢。
 3. 记下 `settings.carry`，用于顶部提示和「顺延」标签（按 `raw` 匹配）。顺延来的任务之后被拖动、编辑、打勾时，`updateTask` / `updateMany` 会调用 `remapCarry`，把记录里的 `raw` 换成新的行文本，标签不会丢。
 4. 如果有任务被移动，就先返回并重新渲染一次，显示最新内容。
 
@@ -222,18 +236,41 @@ app.vault.process(file, data => {
 
 流星特效沿用 4.7 的思路：打勾时把勾选圈的位置存进 `pop.from`；重建后，`render` 末尾的 `flyPop()` 找到对应的新星，在 `.pm-fx-layer` 上画一颗从旧位置飞向新星的光点，新星带 `is-born` 延迟 0.5 秒亮起。`pop.flown` 保证只飞一次。偶尔划过的流星是每 6 秒一次的定时器（75% 概率出现），只在深色、开启动画、页面可见时随机出现。
 
+### 4.9 周期任务排序
+
+卡片顺序就是笔记里的行顺序（已完成的排在最后）。在周期任务区拖动时，按阅读顺序算出插到哪张卡片前面，`moveTaskBlock` 把任务行连同备注整块挪过去。拖进象限仍然是拆出今天的子任务。
+
+### 4.10 大模型
+
+`chat` 用 Obsidian 的 `requestUrl` 调 DMXAPI 的 `/v1/chat/completions`（`Authorization: Bearer 密钥`），从 `choices[0].message.content` 取结果，出错时把 HTTP 状态码和 `error.message` 告诉用户。
+
+- 回顾：`periodDigest` 把本期整理成纯文本（去掉元数据，写上状态、象限、主线、拖了几天），连同本期笔记一起交给模型。
+- 出题：只发本期笔记（或单独一篇）。
+- 结果用 `createNote` 存成本期笔记并打开。同一时间只跑一个请求（`aiBusy`）。
+
+### 4.11 工作助理
+
+`AgentView` 是右侧边栏的视图。
+
+- **接口**：Claude 走 DMXAPI 的 `/v1/messages`（`thinking: adaptive` + `output_config.effort`，推理强度要这样传才生效），其他模型走 `/v1/chat/completions`（`reasoning_effort`）。请求由 `buildChatRequest` 构造。
+- **流式**：用 `fetch` 读 SSE。`sseSplit` 切事件（不完整的最后一行留到下一块），`streamDelta` 把两种格式统一成正文、思考、用量。`fetch` 失败时退回 `requestUrl` 一次性请求。界面最多每 100ms 重画一次。
+- **上下文**：每次发消息由 `agentContext` 重新生成，按开关带上今天、昨天（可能在上一期的笔记里）、本期主线、本期笔记，放进系统提示 `agentSystem`。
+- **改动**：模型在回复末尾写一个 ```` ```workmap ```` JSON 块，`parseActions` 取出来显示成卡片。用户确认后由 `applyAction` 执行。它每次重新读笔记，按名字找今天的任务（`matchTask`），再走 `addDayTask` / `updateTask`，所以照样进撤销历史。执行状态写回 JSON 里的 `state`。
+- **存档**：`formatChat` / `parseChat` 和 md 互转，存在本期文件夹的 `对话/` 里。简报缓存在 `data.json` 的 `brief` 里。
+
 ## 5. 测试
 
-`test/test.js` 用 Node 直接运行。它替换了 `require('obsidian')`（用 `moment` 加一个空类代理），然后只测试 `_test` 导出的纯函数，包括：
+`test/test.js` 用 Node 直接运行。它替换了 `require('obsidian')`（用 `moment` 加一个空类代理），主要测纯函数，另外用假的 vault 测了几段插件流程：
 
-- 区间识别、任务行的解析和格式化（星标、截止日期、元数据、旧的加粗格式）；
-- 备注缩进、插入位置、`ensureDay` 的排序；
-- 习惯解析（带空格和 emoji）、连续天数；
-- 象限归属、列表排序、`spreadY`、`endPos`、`reorderPatches`（同象限排序、跨象限移动、从待放置拖入）；
-- 火势 `heatOf`、最长连续 `longestStreak`、本期战绩 `periodStats`；
-- 星空 `skyLayout`：过滤规则、星级与星座、确定性，以及新增任务后旧星星不移动。
-- 时区换算（含夏令时、午夜）、切换时不写笔记、`carryHold` 的暂缓与确认流程；
-- 自动顺延 `collectCarry` / `markCarried`（标记后不会重复收集）；新建一期 `periodProblem`、`suggestPeriod`、`periodEndFor`、`fillTemplate`（含模板缺 `{{tasks}}`）；输入法回车 `isSubmitKey`；无效日期的 `countdown`。
+- 解析与格式化：星标、截止日期、元数据、旧的加粗格式、`[/]` 和 `[-]`、`%%c%%`；
+- 插入位置、`ensureDay`、象限排序、火势、本期战绩、星空布局；
+- 时区，以及切时区时的暂缓顺延；
+- 自动顺延：不重复收集、`chainOrigin` 往回找、`move` 模式及其还原、顺延范围（不会扫到几年前的往期）；
+- 周期任务排序 `moveTaskBlock`；
+- 本期笔记：加链接、游离内容的识别和整理、同名不覆盖；
+- 大模型：`periodDigest` 的内容，`chat` 的请求格式和错误处理（用 `_request` 替换真实请求）；
+- 工作助理：三个模型的请求格式、SSE 跨块拼接、两种流式事件、操作块解析、按名字找任务、对话存档来回、上下文；用假的 `fetch` 测流式调用、HTTP 错误和退回一次性请求，以及每种改动的执行和对话保存；
+- 新建一期、模板、输入法回车、无效日期。
 
 视图和交互没有自动化测试，需要在 Obsidian 里手动检查。
 
@@ -245,17 +282,19 @@ npm install && npm test
 
 | 决定 | 理由 | 代价 |
 | --- | --- | --- |
-| 单文件、不构建 | 改了就能用，没有工具链 | 文件较长（约 3300 行），类型只能靠约定 |
+| 单文件、不构建 | 改了就能用，没有工具链 | 文件较长（约 5300 行），类型只能靠约定 |
 | 元数据放在 `%%…%%` | 不打扰阅读，标准任务语法不受影响 | 源码模式下行比较长 |
 | 用坐标表示列表顺序 | 兼容旧数据；排序只改少数几行 | 频繁拖动后 y 值会被重新排开，产生更多 diff |
 | 按原文定位行 | 不怕用户同时编辑 | 两行完全相同的任务只能按出现顺序区分 |
 | 每次整体重建 DOM | 简单，状态不会不一致 | 任务非常多时会有一点性能开销（目前规模下可忽略） |
 | 一期限定在同一个月 | 小节标题只写日（`## 19`），路径简单 | 不支持跨月的一期 |
-| 自动顺延直接写文件 | 打开笔记就能看到真实状态，不依赖插件 | 会改动旧日期的小节（`- [>]`） |
+| 自动顺延直接写文件 | 打开笔记就能看到真实状态，不依赖插件 | 会改动旧日期的小节（`- [>]` 或删除） |
+| 本期笔记存成单独文件 | 笔记里的标题不影响时段笔记；单篇也能出题 | 多了一个文件夹 |
+| 大模型结果不流式输出 | 实现简单，结果直接存成笔记 | 要等半分钟到两分钟 |
 
 ## 7. 扩展方向
 
-- **大模型总结 / 复习**：时段笔记本身就是结构化文本（周期任务、每天的完成情况、习惯、备注里的学习笔记），可以直接作为上下文。可以加一个命令，把本期笔记交给模型生成回顾，或根据备注出题。
+- **大模型**：流式输出；每天的小结。
 - **month_plan 联动**：读取 Full Calendar 的事件，显示在日程里，或者把带日程时段的任务同步过去。
 - **快捷键**：N 新建、←/→ 切换日期、T 回到今天。
 - 跨月的一期。

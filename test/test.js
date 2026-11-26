@@ -56,7 +56,6 @@ assert.strictEqual(T.quadOf(t), 1);
 assert.strictEqual(T.parseTaskLine(T.formatTask(t), 0).text, '写第三部分');
 assert.strictEqual(T.formatTask(t), '- [ ] 写第三部分 %%p:pabc%% %%t:09-11%% %%m:70,20%%');
 
-assert.deepStrictEqual([...T.parseHabits(lines[12])], ['REVIEW']);
 
 // ensureDay: insert 19 above 18
 const l2 = lines.slice();
@@ -114,10 +113,6 @@ const nl = ['## 周期任务', '- [ ] a', '    深缩进', '    - x', '- [ ] b']
 const ct = T.collectTasks(nl, T.periodRange(nl), 'period');
 assert.strictEqual(ct[0].note, '深缩进\n- x');
 assert.strictEqual(ct[1].note, '');
-// habits with spaces/emoji
-const hs = T.parseHabits('习惯：✅🏃 健身 30 分钟 ⬜📖 阅读 ✅REVIEW');
-assert.deepStrictEqual([...hs], ['🏃 健身 30 分钟', 'REVIEW']);
-assert.strictEqual(T.formatHabits(['🏃 健身 30 分钟', '📖 阅读'], hs), '习惯：✅🏃 健身 30 分钟 ⬜📖 阅读');
 // list mode
 assert.deepStrictEqual(T.spreadY(1, 1), [25]);
 assert.deepStrictEqual(T.spreadY(2, 3), [68, 82]);
@@ -144,13 +139,6 @@ assert.strictEqual(T.quadOf(ps[0].patch), 3);
 // no-op reorder produces no patches once evenly spaced
 const even = [mk(1, 75, 18), mk(2, 75, 32)];
 assert.deepStrictEqual(T.reorderPatches(even, even[0], 1, 0), []);
-// habit streak
-const hb = new Map([[18, new Set(['a'])], [19, new Set(['a', 'b'])], [20, new Set(['b'])]]);
-assert.strictEqual(T.habitStreak(hb, 'a', 19, 18), 2);
-assert.strictEqual(T.habitStreak(hb, 'a', 20, 18), 2); // today not yet done -> count up to yesterday
-assert.strictEqual(T.habitStreak(hb, 'b', 20, 18), 2);
-assert.strictEqual(T.habitStreak(hb, 'a', 21, 18), 0);
-assert.strictEqual(T.habitStreak(hb, 'a', 19, 19), 1);
 // fx: heat
 const today = require('moment')().format('YYYY-MM-DD');
 const ht = [mk(1, 80, 30), mk(2, 70, 10), mk(3, 20, 20), mk(4, 80, 5, true)];
@@ -165,21 +153,21 @@ assert.strictEqual(r1.soon, true);
 assert.strictEqual(r1.level, 2);
 assert.strictEqual(T.heatOf([hp], [{ id: 'pA', due: '2099-01-01' }]).level, 1);
 // fx: stats
-assert.strictEqual(T.longestStreak(hb, 'a', 18, 21), 2);
-assert.strictEqual(T.longestStreak(hb, 'b', 18, 21), 2);
-assert.strictEqual(T.longestStreak(hb, 'c', 18, 21), 0);
+assert.strictEqual(T.longestRun(new Set([18, 19, 21]), 18, 21), 2);
+assert.strictEqual(T.longestRun(new Set(), 18, 21), 0);
 const st = T.periodStats({
   periodTasks: [{ done: true }, { done: true }],
-  allDaily: [{ done: true }, { done: false }, { done: true }],
-  habitByDay: hb,
-  habits: ['a', 'b'],
+  allDaily: [
+    { done: true, day: 18 }, { done: false, day: 18 }, { done: true, day: 19 },
+    { done: true, cancelled: true, day: 20 }, { done: true, day: 22 },
+  ],
   start: 18,
   end: 30,
   day: 20,
 });
 assert.deepStrictEqual(st, {
-  periodDone: 2, periodTotal: 2, dailyDone: 2, dailyTotal: 3,
-  checkins: 4, best: { name: 'a', n: 2 }, nth: 3, total: 13,
+  periodDone: 2, periodTotal: 2, dailyDone: 3, dailyTotal: 4,
+  activeDays: 2, bestRun: 2, nth: 3, total: 13,
 });
 // sky
 assert.strictEqual(T.hashStr('abc'), T.hashStr('abc'));
@@ -242,9 +230,11 @@ const cl = [
 const today20 = moment('2026-11-20', 'YYYY-MM-DD');
 const ci = T.collectCarry(cl, cp, today20);
 assert.deepStrictEqual(ci.map(i => i.info.text), ['没做完', '更早的']);
-// 清掉时段，保留象限和备注
-assert.deepStrictEqual(ci[0].block, ['- [ ] 没做完 %%m:75,20%%', '  备注']);
+// 清掉时段，保留象限和备注，记下最初安排的日期
+assert.deepStrictEqual(ci[0].block, ['- [ ] 没做完 %%c:2026-11-19%% %%m:75,20%%', '  备注']);
 assert.strictEqual(ci[0].info.from, '11/19');
+assert.strictEqual(ci[0].info.since, '2026-11-19');
+assert.deepStrictEqual(ci[1].block, ['- [ ] 更早的 %%c:2026-11-18%%']);
 const cl2 = [...cl];
 T.markCarried(cl2, ci);
 assert.strictEqual(cl2[10], '- [>] 没做完 %%t:09-11%% %%m:75,20%%');
@@ -337,6 +327,8 @@ async function zoneFlow() {
       workspace: { getLeavesOfType: () => [] },
     };
     pl.saveData = async () => {};
+    pl.history = [];
+    pl.autoWrites = new Map();
     pl.settings = { carry: null, carryHold: '', zone: 'us', usZone: 'America/Chicago' };
     await pl.setZone('us');
     await pl.setZone('hk');
@@ -365,4 +357,493 @@ async function zoneFlow() {
     global.Date = RealDate;
   }
 }
-zoneFlow().then(() => console.log('ALL PASS')).catch(e => { console.error(e); process.exit(1); });
+
+// ---------- 0.6.0：任务状态 ----------
+const sDoing = T.parseTaskLine('- [/] 写到一半 %%m:75,20%%', 0);
+assert.strictEqual(sDoing.doing, true);
+assert.strictEqual(sDoing.done, false);
+assert.strictEqual(T.formatTask(sDoing), '- [/] 写到一半 %%m:75,20%%');
+assert.strictEqual(T.formatTask(Object.assign({}, sDoing, { done: true })), '- [x] 写到一半 %%m:75,20%%');
+const sCan = T.parseTaskLine('- [-] 不做了', 0);
+assert.deepStrictEqual([sCan.done, sCan.cancelled], [true, true]);
+assert.strictEqual(T.formatTask(sCan), '- [-] 不做了');
+// 取消勾选已取消的任务 → 恢复成未开始
+assert.strictEqual(T.formatTask(Object.assign({}, sCan, { done: false })), '- [ ] 不做了');
+assert.strictEqual(T.parseTaskLine('- [>] 已顺延', 0), null);
+assert.strictEqual(T.parseTaskLine('- [?] 别的插件的状态', 0), null);
+// %%c%% 读写
+const sc = T.parseTaskLine('- [ ] a %%p:px%% %%c:2026-11-19%% %%m:75,25%%', 0);
+assert.strictEqual(sc.since, '2026-11-19');
+assert.strictEqual(sc.text, 'a');
+assert.strictEqual(T.formatTask(sc), '- [ ] a %%p:px%% %%c:2026-11-19%% %%m:75,25%%');
+assert.strictEqual(T.parseTaskLine('- [ ] a %%c:乱写%%', 0).since, '');
+// 进行中的任务也会顺延，已取消的不会
+const sl = ['## 周期任务', '---', '## 20', '## 19', '- [/] 进行中 %%m:75,20%%', '- [-] 取消了'];
+const sci = T.collectCarry(sl, cp, today20);
+assert.deepStrictEqual(sci.map(i => i.block[0]), ['- [/] 进行中 %%c:2026-11-19%% %%m:75,20%%']);
+T.markCarried(sl, sci);
+assert.strictEqual(sl[4], '- [>] 进行中 %%m:75,20%%');
+
+// ---------- 拖了几天 ----------
+// 老笔记：没有 %%c%%，从同名 [>] 一路往前找；中间断开就停
+const ol = [
+  '## 周期任务', '---',
+  '## 26', '- [ ] TIM %%m:75,25%%', '- [ ] 新的',
+  '## 25', '- [>] TIM %%m:75,25%%', '- [>] 新的',
+  '## 24', '- [>] TIM %%m:75,25%%',
+  '## 22', '- [>] TIM %%t:09-11%% %%m:75,18%%',
+  '## 21', '- [x] 别的',
+  '## 19', '- [>] TIM',
+];
+assert.strictEqual(T.chainOrigin(ol, cp, 'TIM', 26), '2026-11-22');
+assert.strictEqual(T.chainOrigin(ol, cp, '新的', 26), '2026-11-25');
+assert.strictEqual(T.chainOrigin(ol, cp, '没有', 26), '');
+// [>] 上带着 %%c%% 就直接用
+assert.strictEqual(T.chainOrigin(['## 26', '## 25', '- [>] X %%c:2026-11-02%%'], cp, 'X', 26), '2026-11-02');
+assert.strictEqual(T.carryAge('2026-11-19', moment('2026-11-26', 'YYYY-MM-DD')), 7);
+assert.strictEqual(T.carryAge('', moment('2026-11-26', 'YYYY-MM-DD')), 0);
+// 顺延时把找到的最初日期写进 %%c%%
+const oc = T.collectCarry(ol, cp, moment('2026-11-27', 'YYYY-MM-DD'));
+assert.strictEqual(oc.find(i => i.info.text === 'TIM').info.since, '2026-11-22');
+assert.strictEqual(oc.find(i => i.info.text === '新的').info.since, '2026-11-25');
+
+// ---------- 顺延时删掉原行 ----------
+const mv = ['## 周期任务', '---', '## 20', '## 19', '- [ ] A', '  备注 A', '- [x] B', '- [ ] C', '## 18', '- [ ] D'];
+const mvi = T.collectCarry(mv, cp, today20);
+const mv2 = mv.slice();
+T.markCarried(mv2, mvi, 'move');
+assert.deepStrictEqual(mv2, ['## 周期任务', '---', '## 20', '## 19', '- [x] B', '## 18']);
+T.unmarkCarried(mv2, mvi, 'move');
+for (const l of ['- [ ] A', '  备注 A', '- [ ] C', '- [ ] D']) assert.ok(mv2.includes(l), l);
+assert.ok(mv2.indexOf('  备注 A') === mv2.indexOf('- [ ] A') + 1);
+// mark 模式的还原
+const mk2 = mv.slice();
+const mki = T.collectCarry(mk2, cp, today20);
+T.markCarried(mk2, mki, 'mark');
+assert.ok(mk2.includes('- [>] A'));
+T.unmarkCarried(mk2, mki, 'mark');
+assert.deepStrictEqual(mk2, mv);
+
+// ---------- 周期任务排序 ----------
+const pl0 = ['## 周期任务', '', '- [ ] A', '  备注', '- [ ] B ★★', '- [x] C', '', '---'];
+const pr0 = () => T.periodRange(pl0);
+let ml = pl0.slice();
+assert.ok(T.moveTaskBlock(ml, T.periodRange(ml), '- [ ] A', '- [x] C'));
+assert.deepStrictEqual(ml.slice(2, 6), ['- [ ] B ★★', '- [ ] A', '  备注', '- [x] C']);
+ml = pl0.slice();
+assert.ok(T.moveTaskBlock(ml, T.periodRange(ml), '- [ ] B ★★', '- [ ] A'));
+assert.deepStrictEqual(ml.slice(2, 6), ['- [ ] B ★★', '- [ ] A', '  备注', '- [x] C']);
+ml = pl0.slice();
+assert.ok(T.moveTaskBlock(ml, T.periodRange(ml), '- [ ] A', ''));
+assert.deepStrictEqual(ml, ['## 周期任务', '', '- [ ] B ★★', '- [x] C', '- [ ] A', '  备注', '', '---']);
+ml = pl0.slice();
+assert.strictEqual(T.moveTaskBlock(ml, T.periodRange(ml), '- [ ] 不存在', ''), false);
+assert.strictEqual(T.moveTaskBlock(pl0.slice(), pr0(), '- [ ] A', '- [ ] 不存在'), false);
+
+// ---------- 本期笔记 ----------
+const nb = ['[🧭](obsidian://workmap)', '', '## 周期任务', '', '- [ ] A', '', '---', '', '## 26', '- [ ] x'];
+const nb1 = nb.slice();
+T.addNoteLink(nb1, T.noteLinkLine('2026/11/18-30/控制回路.md', '控制回路'));
+assert.deepStrictEqual(nb1.slice(2), [
+  '## 周期任务', '', '- [ ] A', '', '## 本期笔记', '', '- [[2026/11/18-30/控制回路|控制回路]]', '', '---', '', '## 26', '- [ ] x',
+]);
+// 周期任务区不受影响，天的小节也不受影响
+assert.strictEqual(T.collectTasks(nb1, T.periodRange(nb1), 'period').length, 1);
+assert.deepStrictEqual(T.listDays(nb1).map(d => d.day), [26]);
+T.addNoteLink(nb1, T.noteLinkLine('2026/11/18-30/第二篇.md', '第二篇'));
+assert.deepStrictEqual(T.listNoteLinks(nb1).map(l => [l.link, l.title]), [
+  ['2026/11/18-30/控制回路', '控制回路'], ['2026/11/18-30/第二篇', '第二篇'],
+]);
+// 新的周期任务仍然加在周期任务区里
+assert.strictEqual(T.periodRange(nb1).end, nb1.indexOf('## 本期笔记'));
+assert.strictEqual(T.noteLinkLine('a/b.md', 'x|y]'), '- [[a/b|x y]]');
+assert.deepStrictEqual(T.listNoteLinks(['## 本期笔记', '- [[a#标题|A]]', '随手写的一行', '- [[b]]']).map(l => [l.link, l.title]), [['a', 'A'], ['b', '']]);
+
+// ---------- 游离内容 ----------
+const sb = [
+  '[🧭](obsidian://workmap)', '', '## 周期任务', '- [ ] A', '', '---',
+  '# 控制回路学习笔记', '', '## 0. 先记住', '内容', '', '---', '', '## 1. 概念', '|表|格|', '', '',
+  '## 26', '- [ ] x', '',
+  '## 25', '- [>] x',
+];
+const sbs = T.strayBlocks(sb);
+assert.deepStrictEqual(sbs, [{ start: 6, end: 15 }]);
+assert.strictEqual(T.strayTitle(sb.slice(6, 15)), '控制回路学习笔记');
+const sb2 = sb.slice();
+const taken = T.takeStray(sb2);
+assert.strictEqual(taken.length, 1);
+assert.strictEqual(taken[0].title, '控制回路学习笔记');
+assert.ok(taken[0].text.startsWith('# 控制回路学习笔记\n\n## 0. 先记住'));
+assert.ok(taken[0].text.includes('\n---\n\n## 1. 概念\n|表|格|\n'));
+assert.deepStrictEqual(sb2, ['[🧭](obsidian://workmap)', '', '## 周期任务', '- [ ] A', '', '---', '', '## 26', '- [ ] x', '', '## 25', '- [>] x']);
+assert.deepStrictEqual(T.strayBlocks(sb2), []);
+// 前言、本期笔记里的链接、每天小节里的 ### 标题都不算游离内容
+assert.deepStrictEqual(T.strayBlocks(['# 我的计划', '说明', '## 周期任务', '## 本期笔记', '- [[a]]', '---', '## 26', '### 会议', '记录']), []);
+// 最后一天后面又贴了一段带二级标题的内容
+assert.deepStrictEqual(T.strayBlocks(['## 周期任务', '---', '## 26', '- [ ] x', '## 附录', '内容']), [{ start: 4, end: 6 }]);
+assert.strictEqual(T.strayTitle(['', '**粗体** 开头的一段话，没有标题，比较长比较长比较长比较长比较长']), '粗体 开头的一段话，没有标题，比较长比较长比较长比较长比');
+assert.strictEqual(T.safeFileName('a/b:c?'), 'a b c');
+assert.strictEqual(T.safeFileName('###'), '未命名笔记');
+
+// ---------- 给大模型的摘要 ----------
+const dg = T.periodDigest({
+  p: cp,
+  today: moment('2026-11-26', 'YYYY-MM-DD'),
+  lines: [
+    '## 周期任务', '- [ ] 论文返修 ★★★ 📅 2026-12-02 %%id:pf%%', '  先回审稿人 2', '- [x] 报告 %%id:pq%%',
+    '---',
+    '## 26', '- [ ] 回复审稿意见 %%p:pf%% %%m:75,25%%', '- [/] 读材料 %%m:25,75%%',
+    '## 25', '- [>] 回复审稿意见 %%p:pf%% %%m:75,25%%', '- [x] 报告终稿 %%p:pq%% %%m:75,30%%',
+    '## 24', '- [>] 回复审稿意见 %%p:pf%% %%m:75,25%%',
+  ],
+  notes: [{ title: '控制回路', text: '# 控制回路\nSP、PV、OP' }],
+});
+assert.ok(!dg.includes('%%'));
+assert.ok(dg.includes('今天是 2026-11-26，本期第 9 天'));
+assert.ok(dg.includes('- [未完成] 论文返修 · 重要程度：最重要 · 截止 2026-12-02 · 拆出的每日任务完成 0/1'));
+assert.ok(dg.includes('  先回审稿人 2'));
+assert.ok(dg.includes('- [未完成] 回复审稿意见 ← 主线「论文返修」 · 重要且紧急 · 最早安排在 2026-11-24，已拖 2 天'));
+assert.ok(dg.includes('- [进行中] 读材料 · 不重要不紧急'));
+assert.ok(dg.includes('### 11/24 周二'));
+assert.ok(dg.includes('（另有 1 项当天没做完，顺延到了后面）'));
+assert.ok(dg.indexOf('### 11/24') < dg.indexOf('### 11/26'));
+assert.ok(dg.includes('### 《控制回路》'));
+
+// ---------- 插件：本期笔记、整理游离内容、排序、调用模型 ----------
+async function notesFlow() {
+  const Plugin = require('../main.js');
+  const files = new Map();
+  const folders = new Set();
+  const mkFile = (path, data) => {
+    const name = path.split('/').pop();
+    const f = { path, data, basename: name.replace(/\.md$/, ''), extension: 'md', stat: { mtime: 0 } };
+    files.set(path, f);
+    return f;
+  };
+  const periodFile = mkFile('2026/11/18-30.md', [
+    '## 周期任务', '', '- [ ] A ★', '- [ ] B ★★★', '', '---', '',
+    '# 学习笔记', '', '## 1. 概念', '内容', '', '---', '', '## 2. 更多', '更多内容', '',
+    '## 26', '- [ ] x', '',
+  ].join('\n'));
+  const pl = new Plugin();
+  pl.app = {
+    vault: {
+      getMarkdownFiles: () => [...files.values()],
+      read: async f => f.data,
+      cachedRead: async f => f.data,
+      process: async (f, fn) => { f.data = fn(f.data); return f.data; },
+      getAbstractFileByPath: p => files.get(p) || (folders.has(p) ? { path: p, children: [] } : null),
+      createFolder: async p => { folders.add(p); },
+      create: async (p, data) => {
+        if (files.has(p)) throw new Error('exists');
+        return mkFile(p, data);
+      },
+    },
+    fileManager: { trashFile: async f => { files.delete(f.path); } },
+    metadataCache: {
+      getFirstLinkpathDest: l => files.get(l + '.md') || null,
+      getFileCache: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+  };
+  pl.saveData = async () => {};
+  pl.history = [];
+  pl.autoWrites = new Map();
+  pl.settings = Object.assign({}, { carry: null, carryHold: '', carryMode: 'mark', aiKey: '', aiBase: 'https://www.dmxapi.cn/v1', aiModel: 'claude-sonnet-5-5' });
+  const period = pl.periods()[0];
+  assert.strictEqual(pl.notesFolder(period), '2026/11/18-30');
+
+  // 整理游离内容：原文完整挪到新文件，时段笔记里只留链接
+  assert.strictEqual(await pl.archiveStray(period), 1);
+  const note = files.get('2026/11/18-30/学习笔记.md');
+  assert.ok(note);
+  assert.strictEqual(note.data, '# 学习笔记\n\n## 1. 概念\n内容\n\n---\n\n## 2. 更多\n更多内容\n');
+  assert.deepStrictEqual(periodFile.data.split('\n'), [
+    '## 周期任务', '', '- [ ] A ★', '- [ ] B ★★★', '', '## 本期笔记', '', '- [[2026/11/18-30/学习笔记|学习笔记]]', '', '---', '',
+    '## 26', '- [ ] x', '',
+  ]);
+  assert.strictEqual(await pl.archiveStray(period), 0);
+  const ns = pl.notesOf(period, periodFile.data.split('\n'));
+  assert.deepStrictEqual(ns.map(n => [n.title, n.listed, !!n.file]), [['学习笔记', true, true]]);
+
+  // 同名笔记不覆盖
+  const f2 = await pl.createNote(period, '学习笔记', '# 学习笔记\n');
+  assert.strictEqual(f2.path, '2026/11/18-30/学习笔记 2.md');
+  assert.strictEqual(pl.notesOf(period, periodFile.data.split('\n')).length, 2);
+  await pl.unlinkNote(period, listNoteLinksOf(periodFile)[1]);
+  assert.strictEqual(listNoteLinksOf(periodFile).length, 1);
+
+  // 周期任务拖动排序：B 拖到 A 前面
+  const pts = T.collectTasks(periodFile.data.split('\n'), T.periodRange(periodFile.data.split('\n')), 'period');
+  assert.ok(await pl.movePeriodTask(periodFile, pts[1], pts[0]));
+  assert.ok(periodFile.data.startsWith('## 周期任务\n\n- [ ] B ★★★\n- [ ] A ★\n'));
+
+  // 调用模型：没有密钥直接报错；HTTP 错误把 DMXAPI 的说明带出来；正常时取 choices[0].message.content
+  await assert.rejects(pl.chat('s', 'u'), /API 密钥/);
+  pl.settings.aiKey = 'sk-test';
+  let sent = null;
+  pl._request = async req => { sent = req; return { status: 503, json: { error: { message: '模型 xx 无可用渠道' } } }; };
+  await assert.rejects(pl.chat('s', 'u'), /HTTP 503 · 这个模型现在不可用，检查模型名：模型 xx 无可用渠道/);
+  assert.strictEqual(sent.url, 'https://www.dmxapi.cn/v1/chat/completions');
+  assert.strictEqual(sent.headers.Authorization, 'Bearer sk-test');
+  const body = JSON.parse(sent.body);
+  assert.strictEqual(body.model, 'claude-sonnet-5-5');
+  assert.deepStrictEqual(body.messages.map(m => m.role), ['system', 'user']);
+  pl._request = async () => ({ status: 200, json: { model: 'claude-sonnet-5-5', choices: [{ message: { content: ' 你好 ' }, finish_reason: 'stop' }] } });
+  assert.deepStrictEqual(await pl.chat('s', 'u'), { text: '你好', model: 'claude-sonnet-5-5', truncated: false });
+  pl._request = async () => ({ status: 200, get json() { throw new Error('not json'); } });
+  await assert.rejects(pl.chat('s', 'u'), /HTTP 200/);
+}
+function listNoteLinksOf(f) { return T.listNoteLinks(f.data.split('\n')); }
+
+// 回归：不能把几年前的往期任务都顺延到今天。没设起点只看上一期；设了起点，早于起点的不管
+async function carryScopeFlow() {
+  const Plugin = require('../main.js');
+  const mk = (path, data) => ({ path, data });
+  const files = [
+    mk('2025/10/10-20.md', '## 周期任务\n---\n## 18\n- [ ] 前年的任务\n'),
+    mk('2026/11/1-10.md', '## 周期任务\n---\n## 9\n- [ ] 上一期的任务\n'),
+    mk('2026/11/18-30.md', '## 周期任务\n---\n## 25\n- [ ] 昨天的\n## 17\n- [ ] 起点之前的\n'),
+  ];
+  const make = settings => {
+    const pl = new Plugin();
+    pl.app = {
+      vault: {
+        getMarkdownFiles: () => files,
+        read: async f => f.data,
+        process: async (f, fn) => { f.data = fn(f.data); return f.data; },
+      },
+      workspace: { getLeavesOfType: () => [] },
+    };
+    pl.saveData = async () => {};
+    pl.history = [];
+    pl.autoWrites = new Map();
+    pl.settings = Object.assign({ carry: null, carryHold: '', carryMode: 'mark', carryStart: '' }, settings);
+    return pl;
+  };
+  const snap = files.map(f => f.data);
+  const d26 = moment('2026-11-26', 'YYYY-MM-DD');
+  assert.deepStrictEqual((await make({}).pendingCarry(d26)).map(i => i.info.text), ['上一期的任务', '昨天的', '起点之前的']);
+  assert.deepStrictEqual((await make({ carryStart: '2026-11-18' }).pendingCarry(d26)).map(i => i.info.text), ['昨天的']);
+  assert.strictEqual(await make({ carryStart: '2026-11-18' }).carryOver(d26), 1);
+  assert.strictEqual(files[0].data, snap[0]);
+  assert.strictEqual(files[1].data, snap[1]);
+  assert.ok(files[2].data.includes('- [ ] 起点之前的'));
+  assert.ok(files[2].data.includes('- [>] 昨天的'));
+}
+
+// ---------- 工作助理：纯函数 ----------
+{
+  const base = 'https://www.dmxapi.cn/v1/';
+  const rc = T.buildChatRequest({ base, key: 'k', model: 'claude-sonnet-5-5', effort: 'high', system: 'S', messages: [{ role: 'user', content: 'hi' }], stream: true });
+  assert.strictEqual(rc.url, 'https://www.dmxapi.cn/v1/messages');
+  assert.strictEqual(rc.headers['x-api-key'], 'k');
+  assert.deepStrictEqual(rc.body.output_config, { effort: 'high' });
+  assert.deepStrictEqual(rc.body.thinking, { type: 'adaptive' });
+  assert.strictEqual(rc.body.system, 'S');
+  for (const id of ['deepseek-v4.1-flash', 'gemini-4-hydrogen']) {
+    const ro = T.buildChatRequest({ base, key: 'k', model: id, effort: 'low', system: 'S', messages: [{ role: 'user', content: 'hi' }], stream: true });
+    assert.strictEqual(ro.url, 'https://www.dmxapi.cn/v1/chat/completions');
+    assert.strictEqual(ro.headers.Authorization, 'Bearer k');
+    assert.strictEqual(ro.body.reasoning_effort, 'low');
+    assert.deepStrictEqual(ro.body.messages.map(m => m.role), ['system', 'user']);
+    assert.deepStrictEqual(ro.body.stream_options, { include_usage: true });
+  }
+  assert.strictEqual(T.buildChatRequest({ base, key: 'k', model: 'x', effort: 'low', system: '', messages: [], stream: false }).body.stream_options, undefined);
+  assert.strictEqual(T.agentModel('claude-opus-5-5').api, 'anthropic');
+
+  // SSE：一行被拆在两块里也能拼起来
+  let r = T.sseSplit('data: {"a":1}\n\ndata: {"b"');
+  assert.deepStrictEqual(r.events, [{ a: 1 }]);
+  r = T.sseSplit(r.rest + ':2}\ndata: [DONE]\nevent: ping\ndata: 不是json\n');
+  assert.deepStrictEqual(r.events, [{ b: 2 }]);
+  assert.strictEqual(r.rest, '');
+  // 两种接口的事件
+  assert.strictEqual(T.streamDelta('anthropic', { type: 'content_block_delta', delta: { type: 'text_delta', text: '你' } }).text, '你');
+  assert.strictEqual(T.streamDelta('anthropic', { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '想' } }).thinking, '想');
+  assert.deepStrictEqual(T.streamDelta('anthropic', { type: 'message_delta', usage: { input_tokens: 3, output_tokens: 9, cost: '¥0.01' } }).usage, { input: 3, output: 9, cost: '¥0.01' });
+  assert.strictEqual(T.streamDelta('anthropic', { type: 'error', error: { message: '过载' } }).error, '过载');
+  const od = T.streamDelta('openai', { choices: [{ delta: { content: 'a', reasoning_content: 'r' } }] });
+  assert.deepStrictEqual([od.text, od.thinking], ['a', 'r']);
+  assert.deepStrictEqual(T.streamDelta('openai', { choices: [], usage: { prompt_tokens: 5, completion_tokens: 7 } }).usage, { input: 5, output: 7 });
+  assert.deepStrictEqual(T.replyOf('anthropic', { content: [{ type: 'thinking', thinking: 't' }, { type: 'text', text: 'x' }] }).text, 'x');
+  assert.strictEqual(T.replyOf('openai', { choices: [{ message: { content: 'y', reasoning_content: 'z' } }] }).thinking, 'z');
+
+  // 操作块
+  const pa = T.parseActions('先做 A。\n\n```workmap\n[{"op":"add","text":"A","quad":1},{"op":"rm","task":"x"},{"op":"done","task":"B"}]\n```\n');
+  assert.strictEqual(pa.text, '先做 A。');
+  assert.deepStrictEqual(pa.actions.map(a => a.op), ['add', 'done']);
+  assert.deepStrictEqual(T.parseActions('没有块').actions, []);
+  assert.strictEqual(T.parseActions('```workmap\n不是 json\n```').actions.length, 0);
+  assert.strictEqual(T.visibleReply('正文\n```workmap\n[{"op"'), '正文');
+  assert.strictEqual(T.describeAction({ op: 'add', text: 'A', quad: 1, parent: '论文' }), '新增今天的任务到「马上做」：A（主线：论文）');
+  assert.strictEqual(T.describeAction({ op: 'addPeriod', text: 'M', level: 2, due: '2026-12-01' }), '新增本期主线：M ★★ 📅 2026-12-01');
+  const mt = [{ text: 'TIM_response：reviewer#2', done: false }, { text: '读材料', done: true }, { text: '读材料', done: false }];
+  assert.strictEqual(T.matchTask(mt, '读材料'), mt[2]);
+  assert.strictEqual(T.matchTask(mt, 'reviewer#2'), mt[0]);
+  assert.strictEqual(T.matchTask(mt, '不存在'), null);
+  assert.strictEqual(T.matchTask([{ text: '读 A' }, { text: '读 B' }], '读'), null); // 不唯一
+
+  // 对话存档来回
+  const chat = {
+    title: '今天先做什么', created: '2026-11-26 09:30',
+    messages: [
+      { role: 'user', content: '今天先做什么？', time: '09:30' },
+      { role: 'assistant', content: '先回 reviewer#2。\n\n### 理由\n截止最近。', model: 'Claude Sonnet 5.5', time: '09:31', actions: [{ op: 'add', text: '读意见', quad: 1, state: 'done' }] },
+      { role: 'user', content: '好', time: '09:32' },
+    ],
+  };
+  const md = T.formatChat(chat);
+  assert.ok(md.startsWith('---\nworkmap: chat\ncreated: 2026-11-26 09:30\n---\n\n# 今天先做什么\n'));
+  const back = T.parseChat(md);
+  assert.strictEqual(back.title, '今天先做什么');
+  assert.strictEqual(back.created, '2026-11-26 09:30');
+  assert.deepStrictEqual(back.messages.map(m => [m.role, m.time]), [['user', '09:30'], ['assistant', '09:31'], ['user', '09:32']]);
+  assert.strictEqual(back.messages[1].content, '先回 reviewer#2。\n\n### 理由\n截止最近。');
+  assert.strictEqual(back.messages[1].model, 'Claude Sonnet 5.5');
+  assert.deepStrictEqual(back.messages[1].actions, [{ op: 'add', text: '读意见', quad: 1, state: 'done' }]);
+  assert.strictEqual(T.chatTitle('  帮我把「回复审稿意见」拆成小任务，放进合适的象限  '), '帮我把「回复审稿意见」拆成小任务，放进合适的象限');
+assert.strictEqual(T.chatTitle('一二三四五六七八九十一二三四五六七八九十一二三四五六'), '一二三四五六七八九十一二三四五六七八九十一二三四');
+assert.strictEqual(T.chatTitle('   '), '未命名笔记');
+
+  // 上下文
+  const ctxLines = [
+    '## 周期任务', '- [ ] 论文 ★★★ %%id:pf%%', '---',
+    '## 26', '- [ ] 回复意见 %%p:pf%% %%m:75,25%%',
+    '## 25', '- [>] 回复意见 %%p:pf%% %%m:75,25%%', '- [x] 报告 %%m:75,30%%',
+  ];
+  const now = moment('2026-11-26 14:05', 'YYYY-MM-DD HH:mm');
+  const curP = { p: cp, lines: ctxLines };
+  const ctx = T.agentContext({ now, cur: curP, prev: curP, flags: { today: true, yesterday: true, period: true, notes: true }, notes: [{ title: 'N', text: '要点' }] });
+  assert.ok(ctx.includes('现在：2026-11-26 周四 14:05'));
+  assert.ok(ctx.includes('第 9 天，共 13 天'));
+  assert.ok(ctx.includes('## 本期主线\n- [未完成] 论文 · 重要程度：最重要'));
+  assert.ok(ctx.includes('## 今天的任务（11/26 周四）\n- [未完成] 回复意见 ← 主线「论文」 · 重要且紧急 · 最早安排在 2026-11-25，已拖 1 天'));
+  assert.ok(ctx.includes('## 昨天的任务（11/25 周三）\n- [已完成] 报告'));
+  assert.ok(ctx.includes('### 《N》'));
+  const ctx2 = T.agentContext({ now, cur: curP, prev: null, flags: { today: true, yesterday: true, period: false, notes: false }, notes: [] });
+  assert.ok(!ctx2.includes('本期主线'));
+  assert.ok(ctx2.includes('## 昨天的任务（11/25 周三）\n（没有任务）'));
+  assert.ok(T.agentContext({ now, cur: null, prev: null, flags: {}, notes: [] }).includes('还没有对应的时段笔记'));
+  const sys = T.agentSystem(['09-11', '14-16'], 'CTX');
+  assert.ok(sys.includes('09-11、14-16') && sys.endsWith('# 上下文\n\nCTX'));
+  assert.ok(sys.includes('```workmap'));
+}
+
+// ---------- 工作助理：流式调用、执行建议、存对话 ----------
+async function agentFlow() {
+  const RealDate = Date;
+  const fixed = new RealDate('2026-11-26T06:00:00Z').getTime(); // 香港 14:00
+  global.Date = class extends RealDate {
+    constructor(...a) { if (a.length) super(...a); else super(fixed); }
+    static now() { return fixed; }
+  };
+  try {
+    const Plugin = require('../main.js');
+    const files = new Map();
+    const folders = new Set();
+    const mkFile = (path, data) => {
+      const f = { path, data, basename: path.split('/').pop().replace(/\.md$/, ''), extension: 'md', stat: { mtime: 1, ctime: 1 } };
+      files.set(path, f);
+      return f;
+    };
+    const pf = mkFile('2026/11/18-30.md', ['## 周期任务', '', '- [ ] 论文 ★★★ %%id:pf%%', '', '---', '', '## 26', '', '- [ ] 回复意见 %%p:pf%% %%m:75,25%%', '- [ ] 订会议室 %%m:75,75%%', ''].join('\n'));
+    const pl = new Plugin();
+    pl.app = {
+      vault: {
+        getMarkdownFiles: () => [...files.values()],
+        read: async f => f.data,
+        cachedRead: async f => f.data,
+        modify: async (f, d) => { f.data = d; },
+        process: async (f, fn) => { f.data = fn(f.data); return f.data; },
+        getAbstractFileByPath: p => files.get(p) || (folders.has(p) ? { path: p, children: [] } : null),
+        createFolder: async p => { folders.add(p); },
+        create: async (p, d) => mkFile(p, d),
+      },
+      metadataCache: { getFirstLinkpathDest: () => null, getFileCache: () => null },
+      workspace: { getLeavesOfType: () => [] },
+    };
+    pl.saveData = async () => {};
+    pl.history = [];
+    pl.autoWrites = new Map();
+    pl.settings = { carry: null, carryHold: '', carryMode: 'mark', carryStart: '2026-11-18', zone: 'hk', usZone: 'America/Chicago',
+      slots: ['09-11', '14-16'], aiKey: 'sk-test', aiBase: 'https://www.dmxapi.cn/v1', agentModel: 'claude-sonnet-5-5', agentEffort: 'high' };
+    await pl.setZone('hk');
+
+    // 上下文里有今天的任务
+    const ctx = await pl.agentContextFor({ today: true, yesterday: true, period: true, notes: false });
+    assert.ok(ctx.includes('- [未完成] 回复意见 ← 主线「论文」'));
+
+    // 流式：事件被拆成任意几块，结果照样拼完整；用量取最后一次
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":40}}}\n\n',
+      'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"先看截止"}}\n\ndata: {"type":"content_block_de',
+      'lta","delta":{"type":"text_delta","text":"先回意见。"}}\n\n',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"\\n\\n```workmap\\n[{\\"op\\":\\"move\\",\\"task\\":\\"订会议室\\",\\"quad\\":4}]\\n```"}}\n\n',
+      'data: {"type":"message_delta","usage":{"output_tokens":12,"cost":"¥0.003"}}\n\n',
+    ];
+    let sent = null;
+    const enc = new TextEncoder();
+    pl._fetch = async (url, init) => {
+      sent = { url, init };
+      let i = 0;
+      return { ok: true, status: 200, body: { getReader: () => ({ read: async () => (i < sse.length ? { done: false, value: enc.encode(sse[i++]) } : { done: true }) }) } };
+    };
+    const seen = [];
+    const r = await pl.streamChat({ model: 'claude-sonnet-5-5', effort: 'high', system: 'S', messages: [{ role: 'user', content: '今天先做什么' }], onDelta: a => seen.push(a.text) });
+    assert.strictEqual(sent.url, 'https://www.dmxapi.cn/v1/messages');
+    assert.strictEqual(JSON.parse(sent.init.body).output_config.effort, 'high');
+    assert.strictEqual(r.thinking, '先看截止');
+    assert.ok(r.text.startsWith('先回意见。'));
+    assert.deepStrictEqual(r.usage, { input: 40, output: 12, cost: '¥0.003' });
+    assert.ok(seen.length >= 2);
+    const parsed = T.parseActions(r.text);
+    assert.deepStrictEqual(parsed.actions, [{ op: 'move', task: '订会议室', quad: 4 }]);
+
+    // HTTP 错误
+    pl._fetch = async () => ({ ok: false, status: 401, text: async () => '{"error":{"message":"无效的令牌"}}' });
+    await assert.rejects(pl.streamChat({ model: 'gemini-4-hydrogen', effort: 'low', system: 'S', messages: [] }), /HTTP 401 · 密钥无效：无效的令牌/);
+    // fetch 失败（比如跨域）：退回一次性请求
+    pl._fetch = async () => { throw new TypeError('Failed to fetch'); };
+    pl._request = async req => ({ status: 200, json: { choices: [{ message: { content: '一次性' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } }, req });
+    const warn = console.warn; console.warn = () => {};
+    assert.strictEqual((await pl.streamChat({ model: 'deepseek-v4.1-flash', effort: 'low', system: 'S', messages: [] })).text, '一次性');
+    console.warn = warn;
+
+    // 执行建议
+    await pl.applyAction({ op: 'move', task: '订会议室', quad: 2 });
+    await pl.applyAction({ op: 'add', text: '读 reviewer#2 第 1–3 条', quad: 1, parent: '论文' });
+    await pl.applyAction({ op: 'doing', task: '回复意见' });
+    await pl.applyAction({ op: 'slot', task: '回复意见', slot: '14-16' });
+    await pl.applyAction({ op: 'addPeriod', text: '新主线', level: 2, due: '2026-12-01' });
+    await assert.rejects(pl.applyAction({ op: 'done', task: '不存在的事' }), /找不到/);
+    await assert.rejects(pl.applyAction({ op: 'slot', task: '回复意见', slot: '25-26' }), /没有「25-26」/);
+    const ls = pf.data.split('\n');
+    assert.ok(ls.includes('- [/] 回复意见 %%p:pf%% %%t:14-16%% %%m:75,25%%'), pf.data);
+    assert.ok(ls.includes('- [ ] 读 reviewer#2 第 1–3 条 %%p:pf%% %%m:75,27%%'), pf.data);
+    assert.ok(ls.some(l => /^- \[ \] 订会议室 %%m:\d+,\d+%%$/.test(l) && T.quadOf(T.parseTaskLine(l, 0)) === 2));
+    assert.ok(ls.includes('- [ ] 新主线 ★★ 📅 2026-12-01 %%id:' + T.collectTasks(ls, T.periodRange(ls), 'period')[1].id + '%%'));
+    // 每次执行都进撤销历史
+    assert.strictEqual(pl.history.length, 5);
+
+    // 存对话：放在本期文件夹的「对话」里，第二次保存改同一个文件
+    const chat = { title: '今天先做什么', created: '2026-11-26 14:00', messages: [{ role: 'user', content: '今天先做什么', time: '14:00' }], file: null };
+    const f = await pl.saveChat(chat);
+    assert.strictEqual(f.path, '2026/11/18-30/对话/11-26 1400 今天先做什么.md');
+    chat.messages.push({ role: 'assistant', content: '先回意见。', model: 'Claude Sonnet 5.5', time: '14:01', actions: parsed.actions });
+    await pl.saveChat(chat);
+    assert.strictEqual(files.get(f.path).data, T.formatChat(chat));
+    assert.deepStrictEqual(pl.listChats().map(x => x.path), [f.path]);
+    // 对话不算本期笔记
+    assert.deepStrictEqual(pl.notesOf(pl.periods()[0], pf.data.split('\n')), []);
+  } finally {
+    global.Date = RealDate;
+  }
+}
+
+zoneFlow()
+  .then(notesFlow)
+  .then(carryScopeFlow)
+  .then(agentFlow)
+  .then(() => console.log('ALL PASS'))
+  .catch(e => { console.error(e); process.exit(1); });

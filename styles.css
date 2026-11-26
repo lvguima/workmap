@@ -100,7 +100,6 @@
 .pm-skin .pm-count,
 .pm-skin .pm-meta,
 .pm-skin .pm-pprog-text,
-.pm-skin .pm-habit-count,
 .pm-skin .pm-qcount {
   font-variant-numeric: tabular-nums;
 }
@@ -793,100 +792,6 @@
   background: var(--pm-accent-soft);
   color: var(--pm-accent);
   font-weight: 600;
-}
-
-/* ---------- 习惯 ---------- */
-
-.pm-skin .pm-habits-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.8em 1.1em;
-  margin-top: -0.4em;
-}
-
-.pm-skin .pm-habits-label {
-  display: flex;
-  align-items: baseline;
-  gap: 0.45em;
-}
-
-.pm-skin .pm-habits {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45em;
-}
-
-.pm-skin .pm-habit {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45em;
-  height: 2.15em;
-  padding: 0 0.55em 0 0.35em;
-  border-radius: 999px;
-  background: var(--pm-surface);
-  box-shadow: var(--pm-shadow);
-  font-size: 0.85em;
-  font-weight: 500;
-  color: var(--pm-text-2);
-  cursor: pointer;
-  user-select: none;
-  transition: all 0.2s var(--pm-ease);
-}
-
-.pm-skin .pm-habit:hover { color: var(--pm-text); }
-.pm-skin .pm-habit:active { transform: scale(0.96); }
-
-.pm-skin .pm-habit-dot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5em;
-  height: 1.5em;
-  border-radius: 999px;
-  background: var(--pm-sunken);
-  color: transparent;
-  transition: all 0.2s var(--pm-ease);
-}
-
-.pm-skin .pm-habit-dot svg {
-  width: 0.85em;
-  height: 0.85em;
-  stroke-width: 3.6;
-}
-
-.pm-skin .pm-habit-count {
-  min-width: 1.4em;
-  font-size: 0.85em;
-  font-weight: 600;
-  text-align: center;
-  color: var(--pm-text-3);
-}
-
-.pm-skin .pm-habit.is-on {
-  background: color-mix(in srgb, var(--pm-green) 14%, var(--pm-surface));
-  color: var(--pm-text);
-}
-
-.pm-skin .pm-habit.is-on .pm-habit-dot {
-  background: var(--pm-green);
-  color: #fff;
-}
-
-.pm-skin .pm-habit.is-on .pm-habit-count { color: var(--pm-green); }
-
-.pm-skin .pm-habit.is-edit {
-  padding: 0 0.75em;
-  background: transparent;
-  box-shadow: none;
-  color: var(--pm-accent);
-}
-
-.pm-skin .pm-habit.is-edit:hover { background: var(--pm-accent-soft); }
-
-.pm-skin .pm-habit.is-edit svg {
-  width: 1em;
-  height: 1em;
 }
 
 /* ---------- 输入栏（Spotlight 风格） ---------- */
@@ -1730,24 +1635,6 @@
 
 .pm-skin .pm-pcard:hover .pm-stars.is-empty { opacity: 1; }
 
-.pm-skin .pm-habit-streak {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.1em;
-  font-size: 0.82em;
-  font-weight: 700;
-  color: var(--pm-orange);
-  font-variant-numeric: tabular-nums;
-}
-
-.pm-skin .pm-habit-flame,
-.pm-skin .pm-habit-flame svg {
-  display: inline-flex;
-  width: 0.95em;
-  height: 0.95em;
-  stroke-width: 2.4;
-}
-
 /* ---------- 时段选择弹窗 ---------- */
 
 .pm-modal .pm-pick-list {
@@ -1896,44 +1783,6 @@
 
 .pm-modal .pm-input { background: var(--pm-surface); }
 .pm-modal select.pm-select { background-color: var(--pm-surface); height: 2.5em; border-radius: var(--pm-radius-sm); }
-
-/* 习惯编辑 */
-.pm-modal .pm-hlist {
-  display: flex;
-  flex-direction: column;
-  margin-top: 1.1em;
-  border-radius: var(--pm-radius);
-  background: var(--pm-surface);
-  overflow: hidden;
-}
-
-.pm-modal .pm-hrow {
-  display: flex;
-  align-items: center;
-  gap: 0.25em;
-  padding: 0.25em 0.4em 0.25em 0.6em;
-  border-top: 0.5px solid var(--pm-border);
-}
-
-.pm-modal .pm-hrow:first-child { border-top: none; }
-
-.pm-modal .pm-hrow .pm-input {
-  background: transparent;
-  padding-left: 0.3em;
-}
-
-.pm-modal .pm-hrow .pm-input:focus { box-shadow: none; }
-
-.pm-modal .pm-hrow-idx {
-  width: 1.5em;
-  font-size: 0.85em;
-  font-weight: 600;
-  color: var(--pm-text-3);
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.pm-modal .pm-hadd { margin-top: 0.6em; align-self: flex-start; }
 
 /* ---------- 日期选择 ---------- */
 
@@ -2412,7 +2261,7 @@
 .pm-skin.pm-light .pm-board.has-sky .pm-quad[data-q="4"] { --pm-sun-x: 0%; }
 
 /* 星星 */
-.pm-skin .pm-star {
+.pm-skin .pm-skystar {
   --sz: 3px;
   position: absolute;
   width: var(--sz);
@@ -2426,14 +2275,14 @@
   transition: width 0.25s var(--pm-ease), height 0.25s var(--pm-ease), opacity 0.25s var(--pm-ease), box-shadow 0.25s var(--pm-ease);
 }
 
-.pm-skin.pm-light .pm-star {
+.pm-skin.pm-light .pm-skystar {
   color: color-mix(in srgb, var(--pm-qc) 85%, #fff);
   box-shadow: 0 0 calc(var(--sz) * 1.4) color-mix(in srgb, currentColor 60%, transparent), 0 0 0 0.5px rgba(255, 255, 255, 0.7);
 }
 
-.pm-skin .pm-star[data-level="1"] { --sz: 4px; }
-.pm-skin .pm-star[data-level="2"] { --sz: 5px; }
-.pm-skin .pm-star[data-level="3"] { --sz: 6px; }
+.pm-skin .pm-skystar[data-level="1"] { --sz: 4px; }
+.pm-skin .pm-skystar[data-level="2"] { --sz: 5px; }
+.pm-skin .pm-skystar[data-level="3"] { --sz: 6px; }
 
 .pm-skin .pm-star-spark {
   position: absolute;
@@ -2450,7 +2299,7 @@
   opacity: 0.85;
 }
 
-.pm-skin.pm-fx .pm-star.is-today { animation: pm-twinkle 2.8s ease-in-out infinite; animation-delay: var(--tw, 0s); }
+.pm-skin.pm-fx .pm-skystar.is-today { animation: pm-twinkle 2.8s ease-in-out infinite; animation-delay: var(--tw, 0s); }
 .pm-skin.pm-fx .pm-star-spark { animation: pm-spark-spin 6s ease-in-out infinite; }
 
 @keyframes pm-twinkle {
@@ -2464,8 +2313,8 @@
 }
 
 /* 新点亮的星：等流星飞到再亮起 */
-.pm-skin.pm-fx .pm-star.is-born { animation: pm-born 0.9s cubic-bezier(0.3, 1.6, 0.5, 1) 0.5s both; }
-.pm-skin.pm-fx .pm-star.is-born.is-quick { animation-delay: 0s; }
+.pm-skin.pm-fx .pm-skystar.is-born { animation: pm-born 0.9s cubic-bezier(0.3, 1.6, 0.5, 1) 0.5s both; }
+.pm-skin.pm-fx .pm-skystar.is-born.is-quick { animation-delay: 0s; }
 
 @keyframes pm-born {
   0% { opacity: 0; transform: translate(-50%, -50%) scale(0); }
@@ -2498,10 +2347,10 @@
 .pm-skin .pm-sky-lines polyline.is-kin { opacity: 0.75; stroke-dasharray: none; }
 
 /* 悬停联动 */
-.pm-skin .pm-sky.is-focus .pm-star { opacity: calc(var(--o, 0.8) * 0.35); }
-.pm-skin .pm-sky.is-focus .pm-star.is-kin { opacity: 1; }
+.pm-skin .pm-sky.is-focus .pm-skystar { opacity: calc(var(--o, 0.8) * 0.35); }
+.pm-skin .pm-sky.is-focus .pm-skystar.is-kin { opacity: 1; }
 
-.pm-skin .pm-star.is-hot {
+.pm-skin .pm-skystar.is-hot {
   width: calc(var(--sz) * 1.8);
   height: calc(var(--sz) * 1.8);
   opacity: 1 !important;
@@ -2526,8 +2375,8 @@
 
 .pm-skin.pm-light .pm-star-name { background: rgba(255, 255, 255, 0.85); color: var(--pm-text); box-shadow: var(--pm-shadow); }
 .pm-skin .pm-star-name.is-right { left: auto; right: calc(100% + 7px); }
-.pm-skin .pm-star.is-hot .pm-star-name,
-.pm-skin .pm-star.is-label .pm-star-name { opacity: 1; }
+.pm-skin .pm-skystar.is-hot .pm-star-name,
+.pm-skin .pm-skystar.is-label .pm-star-name { opacity: 1; }
 
 /* 夜空装饰：微尘、银河、月亮 */
 .pm-skin .pm-sky-dust { position: absolute; inset: 0; }
@@ -2678,7 +2527,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pm-skin .pm-star,
+  .pm-skin .pm-skystar,
   .pm-skin .pm-star-spark,
   .pm-skin .pm-sky-dust span,
   .pm-skin .pm-sky-cloud { animation: none !important; }
@@ -2710,7 +2559,7 @@
 }
 
 /* 已点亮的任务星星也轻轻闪烁（今天的那颗闪得更明显） */
-.pm-skin.pm-dark.pm-fx .pm-star:not(.is-today):not(.is-born) {
+.pm-skin.pm-dark.pm-fx .pm-skystar:not(.is-today):not(.is-born) {
   animation: pm-soft-twinkle 4.5s ease-in-out infinite;
   animation-delay: calc(var(--tw, 0s) * -1);
 }
@@ -2783,7 +2632,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pm-skin .pm-star,
+  .pm-skin .pm-skystar,
   .pm-skin canvas.pm-galaxy,
   .pm-skin .pm-rstar,
   .pm-skin .pm-sky-dust span { animation: none !important; }
@@ -2903,11 +2752,11 @@
 
 /* 玻璃面板：半透明，背后的星空柔化 */
 .pm-skin.pm-space .pm-pcard,
-.pm-skin.pm-space .pm-habit,
 .pm-skin.pm-space .pm-composer,
 .pm-skin.pm-space .pm-timeline,
 .pm-skin.pm-space .pm-tray,
 .pm-skin.pm-space .pm-tips,
+.pm-skin.pm-space .pm-ncard,
 .pm-skin.pm-space .pm-carry {
   -webkit-backdrop-filter: blur(10px) saturate(140%);
   backdrop-filter: blur(10px) saturate(140%);
@@ -2925,10 +2774,6 @@
 
 .pm-skin.pm-space.pm-dark .pm-pcard[data-level="3"] {
   box-shadow: var(--pm-shadow), inset 0 0 0 1px color-mix(in srgb, var(--pm-star) 30%, transparent), 0 0 18px color-mix(in srgb, var(--pm-star) 14%, transparent);
-}
-
-.pm-skin.pm-space.pm-dark .pm-habit.is-on {
-  box-shadow: var(--pm-shadow), 0 0 12px color-mix(in srgb, var(--pm-green) 22%, transparent);
 }
 
 .pm-skin.pm-space.pm-dark .pm-composer:focus-within {
@@ -2995,4 +2840,481 @@
 @media (prefers-reduced-motion: reduce) {
   .pm-space-nebula,
   .pm-skin .pm-slot.is-now::after { animation: none !important; }
+}
+
+/* =========================================================
+   0.6.0：重要程度色条、进行中 / 已取消、拖了几天、周期任务排序、本期笔记
+   ========================================================= */
+
+.pm-skin {
+  --pm-lv1: #5ac8fa;
+  --pm-lv2: var(--pm-orange);
+  --pm-lv3: var(--pm-red);
+}
+
+/* 周期任务左边的色条：一眼看出重要程度 */
+.pm-skin .pm-pcard[data-level="1"],
+.pm-skin .pm-pcard[data-level="2"],
+.pm-skin .pm-pcard[data-level="3"] { overflow: visible; }
+
+.pm-skin .pm-pcard[data-level="1"]::before,
+.pm-skin .pm-pcard[data-level="2"]::before,
+.pm-skin .pm-pcard[data-level="3"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.9em;
+  bottom: 0.9em;
+  width: 0.25em;
+  border-radius: 0 999px 999px 0;
+  background: var(--pm-lvc);
+}
+
+.pm-skin .pm-pcard[data-level="1"] { --pm-lvc: var(--pm-lv1); }
+.pm-skin .pm-pcard[data-level="2"] { --pm-lvc: var(--pm-lv2); }
+.pm-skin .pm-pcard[data-level="3"] { --pm-lvc: var(--pm-lv3); }
+.pm-skin.pm-dark .pm-pcard[data-level="3"]::before { box-shadow: 0 0 10px color-mix(in srgb, var(--pm-lv3) 60%, transparent); }
+
+.pm-skin .pm-level-tag {
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--pm-lvc, var(--pm-text-3));
+}
+
+.pm-skin .pm-pcard.is-done::before { opacity: 0.4; }
+
+/* 进行中 / 已取消 */
+.pm-skin .pm-pill.is-doing {
+  background: color-mix(in srgb, var(--pm-accent) 15%, transparent);
+  color: var(--pm-accent);
+}
+
+.pm-skin .pm-pcard.is-doing .pm-check,
+.pm-skin .pm-card.is-doing .pm-check {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--pm-accent) 35%, transparent) 50%, transparent 50%);
+}
+
+.pm-skin .pm-tags > .pm-doing-tag {
+  padding: 0 0.45em;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pm-accent) 14%, transparent);
+  color: var(--pm-accent);
+  font-weight: 600;
+}
+
+.pm-skin .pm-tags > .pm-cancel-tag { color: var(--pm-text-3); }
+.pm-skin .pm-card.is-cancelled .pm-text,
+.pm-skin .pm-pcard.is-cancelled .pm-pcard-title { text-decoration-style: double; }
+.pm-skin .pm-card.is-cancelled .pm-check.is-on,
+.pm-skin .pm-pcard.is-cancelled .pm-check.is-on { background: var(--pm-text-3); border-color: var(--pm-text-3); }
+
+/* 每日任务上的主线标签带上主线的重要程度 */
+.pm-skin .pm-tags > .pm-parent[data-level="1"]::before,
+.pm-skin .pm-tags > .pm-parent[data-level="2"]::before,
+.pm-skin .pm-tags > .pm-parent[data-level="3"]::before { content: "● "; font-size: 0.8em; }
+.pm-skin .pm-tags > .pm-parent[data-level="1"]::before { color: var(--pm-lv1); }
+.pm-skin .pm-tags > .pm-parent[data-level="2"]::before { color: var(--pm-lv2); }
+.pm-skin .pm-tags > .pm-parent[data-level="3"]::before { color: var(--pm-lv3); }
+
+/* 已拖 N 天：越久越醒目 */
+.pm-skin .pm-tags > .pm-age {
+  padding: 0 0.45em;
+  border-radius: 999px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.pm-skin .pm-tags > .pm-age.is-lo {
+  background: color-mix(in srgb, var(--pm-orange) 13%, transparent);
+  color: var(--pm-orange);
+}
+
+.pm-skin .pm-tags > .pm-age.is-mid {
+  background: color-mix(in srgb, var(--pm-orange) 24%, transparent);
+  color: var(--pm-orange);
+}
+
+.pm-skin .pm-tags > .pm-age.is-hi {
+  background: var(--pm-red);
+  color: #fff;
+}
+
+.pm-skin.pm-fx .pm-tags > .pm-age.is-hi { animation: pm-age-pulse 2.6s ease-in-out infinite; }
+
+@keyframes pm-age-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pm-red) 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--pm-red) 22%, transparent); }
+}
+
+/* 周期任务拖动排序的插入位置 */
+.pm-skin .pm-pcard.is-drop-before::after,
+.pm-skin .pm-pcard.is-drop-after::after {
+  content: "";
+  position: absolute;
+  top: 0.4em;
+  bottom: 0.4em;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--pm-accent);
+  box-shadow: 0 0 8px var(--pm-accent);
+  pointer-events: none;
+}
+
+.pm-skin .pm-pcard.is-drop-before::after { left: -0.6em; }
+.pm-skin .pm-pcard.is-drop-after::after { right: -0.6em; }
+.pm-skin .pm-pcard.is-dragsrc { opacity: 0.35; }
+
+/* 本期笔记 */
+.pm-skin .pm-notes { margin-top: 1.6em; }
+
+.pm-skin .pm-notes .pm-section-head .pm-btn[disabled] { opacity: 0.55; cursor: progress; }
+
+.pm-skin .pm-ngrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15em, 1fr));
+  gap: 0.9em;
+}
+
+.pm-skin .pm-ncard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45em;
+  min-height: 6.5em;
+  padding: 0.9em 1.05em 0.8em;
+  border-radius: var(--pm-radius-lg);
+  background: var(--pm-surface);
+  box-shadow: var(--pm-shadow);
+  cursor: pointer;
+  transition: transform 0.25s var(--pm-ease), box-shadow 0.25s var(--pm-ease);
+}
+
+.pm-skin .pm-ncard:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--pm-shadow), 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.pm-skin .pm-ncard.is-add {
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--pm-border-strong);
+  color: var(--pm-accent);
+  font-weight: 500;
+}
+
+.pm-skin .pm-ncard.is-add:hover { transform: none; background: var(--pm-accent-soft); }
+.pm-skin .pm-ncard.is-missing { opacity: 0.5; cursor: default; }
+
+.pm-skin .pm-ncard-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  min-width: 0;
+}
+
+.pm-skin .pm-ncard-icon,
+.pm-skin .pm-ncard-icon svg {
+  display: inline-flex;
+  flex: none;
+  width: 1.05em;
+  height: 1.05em;
+  color: var(--pm-accent);
+}
+
+.pm-skin .pm-ncard[data-kind="ai-review"] .pm-ncard-icon,
+.pm-skin .pm-ncard[data-kind="ai-review"] .pm-ncard-icon svg { color: #af52de; }
+.pm-skin .pm-ncard[data-kind="ai-quiz"] .pm-ncard-icon,
+.pm-skin .pm-ncard[data-kind="ai-quiz"] .pm-ncard-icon svg { color: var(--pm-green); }
+
+.pm-skin .pm-ncard-title {
+  overflow: hidden;
+  font-family: var(--pm-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--pm-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pm-skin .pm-ncard-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.9em;
+  font-size: 0.82em;
+  line-height: 1.5;
+  color: var(--pm-text-2);
+  word-break: break-word;
+}
+
+.pm-skin .pm-ncard-foot {
+  display: flex;
+  gap: 0.7em;
+  margin-top: auto;
+  font-size: 0.74em;
+  font-weight: 500;
+  color: var(--pm-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.pm-skin .pm-ncard-tag {
+  padding: 0 0.45em;
+  border-radius: 999px;
+  background: var(--pm-sunken-2);
+}
+
+.pm-skin .pm-stray {
+  background: color-mix(in srgb, var(--pm-accent) 8%, var(--pm-surface));
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--pm-accent) 30%, transparent);
+}
+
+.pm-skin .pm-stray .pm-carry-icon,
+.pm-skin .pm-stray .pm-carry-icon svg { color: var(--pm-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-skin .pm-tags > .pm-age.is-hi { animation: none !important; }
+}
+
+.pm-skin.pm-space.pm-dark .pm-carry.pm-stray {
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--pm-accent) 18%, transparent), transparent 60%),
+    var(--pm-surface);
+}
+
+/* =========================================================
+   工作助理（右侧边栏）
+   ========================================================= */
+
+.pm-agent.pm-skin {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0 !important;
+  overflow: hidden;
+  background: var(--pm-bg);
+}
+
+.pm-skin .pm-ag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.6em 0.75em;
+  border-bottom: 0.5px solid var(--pm-border);
+}
+
+.pm-skin select.pm-ag-model { max-width: 11.5em; }
+.pm-skin .pm-ag-effort button.pm-zone-btn { padding: 0 0.7em; }
+
+.pm-skin .pm-ag-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.75em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75em;
+}
+
+.pm-skin .pm-ag-brief {
+  padding: 0.7em 0.85em;
+  border-radius: var(--pm-radius-lg);
+  background:
+    linear-gradient(150deg, color-mix(in srgb, var(--pm-orange) 12%, transparent), transparent 60%),
+    var(--pm-surface);
+  box-shadow: var(--pm-shadow);
+}
+
+.pm-skin .pm-ag-brief-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+}
+
+.pm-skin .pm-ag-brief-icon,
+.pm-skin .pm-ag-brief-icon svg { display: inline-flex; width: 1.05em; height: 1.05em; color: var(--pm-orange); }
+.pm-skin .pm-ag-brief-title { font-weight: 700; color: var(--pm-text); }
+.pm-skin .pm-ag-brief-body { margin-top: 0.45em; font-size: 0.9em; line-height: 1.55; color: var(--pm-text); }
+.pm-skin .pm-ag-brief.is-folded .pm-ag-brief-body { display: none; }
+
+.pm-skin .pm-ag-meta {
+  font-size: 0.74em;
+  color: var(--pm-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.pm-skin .pm-ag-hint { font-size: 0.85em; line-height: 1.55; color: var(--pm-text-2); }
+.pm-skin .pm-ag-hint.is-wait,
+.pm-skin .pm-ag-dots { animation: pm-ag-breathe 1.4s ease-in-out infinite; }
+.pm-skin .pm-ag-dots { font-size: 1.3em; letter-spacing: 0.1em; color: var(--pm-text-3); }
+
+@keyframes pm-ag-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.pm-skin .pm-ag-welcome { padding: 0.6em 0.2em; }
+.pm-skin .pm-ag-welcome-title { margin-bottom: 0.35em; font-family: var(--pm-display); font-size: 1.1em; font-weight: 700; color: var(--pm-text); }
+
+.pm-skin .pm-ag-msg { display: flex; flex-direction: column; gap: 0.35em; }
+.pm-skin .pm-ag-msg.is-user { align-items: flex-end; }
+
+.pm-skin .pm-ag-user {
+  max-width: 88%;
+  padding: 0.5em 0.8em;
+  border-radius: 1.1em 1.1em 0.3em 1.1em;
+  background: var(--pm-accent);
+  color: #fff;
+  font-size: 0.92em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pm-skin .pm-ag-body {
+  font-size: 0.92em;
+  line-height: 1.6;
+  color: var(--pm-text);
+  word-break: break-word;
+}
+
+.pm-skin .pm-ag-body p,
+.pm-skin .pm-ag-brief-body p { margin: 0.3em 0; }
+.pm-skin .pm-ag-body h1,
+.pm-skin .pm-ag-body h2,
+.pm-skin .pm-ag-body h3,
+.pm-skin .pm-ag-brief-body h3 { margin: 0.7em 0 0.25em; font-size: 1em; font-weight: 700; }
+.pm-skin .pm-ag-brief-body h3:first-child { margin-top: 0.2em; }
+.pm-skin .pm-ag-body pre { font-size: 0.85em; }
+
+.pm-skin .pm-ag-think {
+  border-left: 2px solid var(--pm-border-strong);
+  padding-left: 0.6em;
+  font-size: 0.8em;
+  color: var(--pm-text-3);
+}
+
+.pm-skin .pm-ag-think summary { cursor: pointer; user-select: none; }
+.pm-skin .pm-ag-think-body { max-height: 14em; overflow-y: auto; margin-top: 0.3em; white-space: pre-wrap; line-height: 1.5; }
+
+.pm-skin .pm-ag-copy { margin-left: 0.6em; cursor: pointer; opacity: 0; transition: opacity 0.15s; }
+.pm-skin .pm-ag-msg:hover .pm-ag-copy { opacity: 1; }
+
+/* 建议的改动 */
+.pm-skin .pm-ag-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  padding: 0.55em 0.65em;
+  border-radius: var(--pm-radius);
+  background: var(--pm-surface);
+  box-shadow: var(--pm-shadow), inset 0 0 0 1px color-mix(in srgb, var(--pm-accent) 25%, transparent);
+}
+
+.pm-skin .pm-ag-actions-head {
+  display: flex;
+  align-items: center;
+  font-size: 0.78em;
+  font-weight: 700;
+  color: var(--pm-accent);
+}
+
+.pm-skin .pm-ag-act {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: 0.86em;
+  color: var(--pm-text);
+}
+
+.pm-skin .pm-ag-act-icon,
+.pm-skin .pm-ag-act-icon svg { display: inline-flex; flex: none; width: 1em; height: 1em; color: var(--pm-accent); }
+.pm-skin .pm-ag-act-text { flex: 1; min-width: 0; line-height: 1.4; word-break: break-word; }
+.pm-skin .pm-ag-act-err { font-size: 0.85em; color: var(--pm-red); }
+.pm-skin .pm-ag-act-state { font-size: 0.82em; color: var(--pm-text-3); white-space: nowrap; }
+.pm-skin .pm-ag-act.is-done .pm-ag-act-state { color: var(--pm-green); font-weight: 600; }
+.pm-skin .pm-ag-act.is-skip .pm-ag-act-text { color: var(--pm-text-3); text-decoration: line-through; }
+.pm-skin .pm-ag-act .pm-iconbtn { width: 1.7em; height: 1.7em; }
+.pm-skin .pm-ag-act .pm-ag-ok { color: var(--pm-green); }
+
+/* 输入区 */
+.pm-skin .pm-ag-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45em;
+  padding: 0.6em 0.75em 0.75em;
+  border-top: 0.5px solid var(--pm-border);
+}
+
+.pm-skin .pm-ag-quick,
+.pm-skin .pm-ag-ctx {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3em;
+}
+
+.pm-skin button.pm-ag-chip,
+.pm-skin button.pm-ag-ctxbtn {
+  height: 1.9em;
+  padding: 0 0.7em;
+  border: none;
+  border-radius: 999px;
+  background: var(--pm-sunken);
+  color: var(--pm-text-2);
+  font-size: 0.78em;
+  font-weight: 600;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.pm-skin button.pm-ag-chip:hover:not(:disabled) { background: var(--pm-accent-soft); color: var(--pm-accent); }
+.pm-skin .pm-ag-ctx-label { font-size: 0.76em; color: var(--pm-text-3); }
+.pm-skin button.pm-ag-ctxbtn.is-on { background: var(--pm-accent-soft); color: var(--pm-accent); }
+
+.pm-skin .pm-ag-inputrow {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4em;
+  padding: 0.35em 0.35em 0.35em 0.75em;
+  border-radius: 1.2em;
+  background: var(--pm-surface);
+  box-shadow: var(--pm-shadow);
+}
+
+.pm-skin .pm-ag-inputrow:focus-within { box-shadow: var(--pm-shadow), 0 0 0 3px var(--pm-accent-line); }
+
+.pm-skin textarea.pm-ag-input {
+  flex: 1;
+  min-height: 1.9em;
+  max-height: 180px;
+  padding: 0.35em 0;
+  border: none;
+  background: transparent;
+  color: var(--pm-text);
+  font-size: 0.92em;
+  line-height: 1.45;
+  resize: none;
+  box-shadow: none;
+}
+
+.pm-skin textarea.pm-ag-input:focus { box-shadow: none; outline: none; }
+
+.pm-skin .pm-ag-send.pm-iconbtn {
+  flex: none;
+  width: 2em;
+  height: 2em;
+  border-radius: 999px;
+  background: var(--pm-accent);
+  color: #fff;
+}
+
+.pm-skin .pm-ag-send.is-stop { background: var(--pm-text-2); }
+.pm-skin .pm-ag-send svg { width: 1em; height: 1em; stroke-width: 2.6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-skin .pm-ag-hint.is-wait,
+  .pm-skin .pm-ag-dots { animation: none !important; }
 }
