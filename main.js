@@ -57,6 +57,7 @@ const DEFAULT_SETTINGS = {
   agentEffort: 'medium',
   agentCtx: { today: true, yesterday: true, period: true, notes: false },
   brief: null,              // 今日简报缓存：{ date, at, model, text, usage }
+  migrations: [],           // 提前建好的下一期：等它开始那天再迁移周期任务 [{ from, to }]
 };
 
 // DMXAPI 上常用的对话模型，设置里也可以填别的
@@ -367,6 +368,41 @@ function findRaw(lines, range, raw) {
     if (lines[i] === raw) return i;
   }
   return -1;
+}
+
+// 一期里没完成的周期任务块（任务行和备注）
+function openPeriodBlocks(lines) {
+  const r = periodRange(lines);
+  if (!r) return [];
+  return collectTasks(lines, r, 'period')
+    .filter(t => !t.done)
+    .map(t => ({ raw: t.raw, id: t.id, text: t.text, block: [formatTask(t), ...lines.slice(t.line + 1, t.line + 1 + t.children)] }));
+}
+
+// 把周期任务块加到某一期的周期任务区末尾。编号或文字已经在的跳过，返回加了几个
+function insertPeriodBlocks(lines, blocks) {
+  let r = periodRange(lines);
+  if (!r) {
+    lines.unshift('## 周期任务', '');
+    r = periodRange(lines);
+  }
+  const have = collectTasks(lines, r, 'period');
+  const add = blocks.filter(b => !have.some(t => (b.id && t.id === b.id) || t.text === b.text));
+  if (!add.length) return 0;
+  let at = r.start;
+  for (let i = r.start + 1; i < r.end; i++) if (lines[i].trim()) at = i;
+  const ins = add.flatMap(b => b.block);
+  lines.splice(at + 1, 0, ...(at === r.start ? ['', ...ins] : ins));
+  return add.length;
+}
+
+// 从 source 里删掉这些块（按原文找）
+function removePeriodBlocks(lines, blocks) {
+  for (const b of blocks) {
+    const r = periodRange(lines);
+    const idx = r ? findRaw(lines, r, b.raw) : -1;
+    if (idx >= 0) lines.splice(idx, 1 + countChildren(lines, idx, r.end));
+  }
 }
 
 // 拖动排序：把 srcRaw 那一块（任务行和备注）挪到 beforeRaw 那一块前面；beforeRaw 为空就挪到最后一个任务后面。
@@ -2506,6 +2542,16 @@ class WorkmapPlugin extends Plugin {
     return DEFAULT_TEMPLATE;
   }
 
+  // 迁移周期任务要用的上一期：新一期开始之前最近的那一期
+  migrationSource(start) {
+    return this.periods().find(p => p.startDate.isBefore(start, 'day')) || null;
+  }
+
+  // 上一期还没结束就提前建下一期：现在迁移会把这一期的主线搬空，所以推迟到新一期开始那天
+  migrationDeferred(source, today) {
+    return !!source && !today.isAfter(source.endDate, 'day');
+  }
+
   async createPeriod(start, end, migrate) {
     const { vault } = this.app;
     const problem = periodProblem(start, end, this.periods());
@@ -2516,23 +2562,13 @@ class WorkmapPlugin extends Plugin {
 
     const folder = `${start.year()}/${pad(start.month() + 1)}`;
     const path = `${folder}/${start.date()}-${end.date()}.md`;
+    const today = zoneNow().startOf('day');
 
     let moved = [];
-    let source = null;
-    if (migrate) {
-      source = this.periods().find(p => p.startDate.isBefore(start, 'day'));
-      if (source) {
-        const { lines } = splitLines(await vault.read(source.file));
-        const r = periodRange(lines);
-        if (r) {
-          moved = collectTasks(lines, r, 'period')
-            .filter(t => !t.done)
-            .map(t => ({ raw: t.raw, block: [formatTask(t), ...lines.slice(t.line + 1, t.line + 1 + t.children)] }));
-        }
-      }
-    }
+    const source = migrate ? this.migrationSource(start) : null;
+    const defer = this.migrationDeferred(source, today);
+    if (source && !defer) moved = openPeriodBlocks(splitLines(await vault.read(source.file)).lines);
 
-    const today = zoneNow().startOf('day');
     const inRange = !today.isBefore(start, 'day') && !today.isAfter(end, 'day');
     const day = pad(inRange ? today.date() : start.date());
     const content = fillTemplate(await this.loadTemplate(), moved.map(m => m.block), day);
@@ -2540,17 +2576,60 @@ class WorkmapPlugin extends Plugin {
     if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
     const file = await vault.create(path, content);
 
-    if (source && moved.length) {
-      await this.mutate(source.file, lines => {
-        for (const m of moved) {
-          const r = periodRange(lines);
-          const idx = r ? findRaw(lines, r, m.raw) : -1;
-          if (idx >= 0) lines.splice(idx, 1 + countChildren(lines, idx, r.end));
-        }
-      });
+    if (moved.length) await this.mutate(source.file, lines => removePeriodBlocks(lines, moved));
+    if (defer) {
+      this.settings.migrations = (this.settings.migrations || []).filter(m => m.to !== path);
+      this.settings.migrations.push({ from: source.file.path, to: path });
+      await this.saveData(this.settings);
+      new Notice(`已创建 ${path}。${source.label} 还没结束，到 ${start.month() + 1}/${start.date()} 新一期开始时，再把那时没完成的周期任务移过去`, 8000);
+    } else {
+      new Notice(`已创建 ${path}` + (moved.length ? `，从 ${source.label} 迁移了 ${moved.length} 个周期任务` : ''));
     }
-    new Notice(`已创建 ${path}` + (moved.length ? `，从 ${source.label} 迁移了 ${moved.length} 个周期任务` : ''));
     return file;
+  }
+
+  // 新一期开始了：执行之前推迟的迁移。返回迁移了几个周期任务
+  async runMigrations(today) {
+    const list = this.settings.migrations || [];
+    if (!list.length || this.migrating) return 0;
+    this.migrating = true;
+    let total = 0;
+    try {
+      const periods = this.periods();
+      const keep = [];
+      for (const m of list) {
+        const to = periods.find(p => p.file.path === m.to);
+        const from = periods.find(p => p.file.path === m.from);
+        if (!to || !from) continue; // 文件没了，这条作废
+        if (today.isBefore(to.startDate, 'day')) {
+          keep.push(m);
+          continue;
+        }
+        const blocks = openPeriodBlocks(splitLines(await this.app.vault.read(from.file)).lines);
+        let added = 0;
+        if (blocks.length) {
+          await this.mutate(to.file, lines => {
+            added = insertPeriodBlocks(lines, blocks);
+            if (!added) return false;
+          }, false);
+          // 加进新一期的才从旧的一期删掉；已经在新一期里的（同编号）也删掉，免得两边都挂着
+          await this.mutate(from.file, lines => removePeriodBlocks(lines, blocks), false);
+        }
+        total += blocks.length;
+        if (blocks.length) new Notice(`新的一期开始了：从 ${from.label} 迁移了 ${blocks.length} 个没完成的周期任务`);
+      }
+      if (keep.length !== list.length) {
+        this.settings.migrations = keep;
+        await this.saveData(this.settings);
+      }
+    } finally {
+      this.migrating = false;
+    }
+    return total;
+  }
+
+  pendingMigration(path) {
+    return (this.settings.migrations || []).find(m => m.to === path || m.from === path) || null;
   }
 
   async gotoToday() {
@@ -2958,6 +3037,11 @@ class MatrixView extends ItemView {
       else this.day = inRange(today) ? today.clone() : this.period.startDate.clone();
     }
 
+    if (this.follow && await this.plugin.runMigrations(today)) {
+      this.again = true;
+      return;
+    }
+
     let held = [];
     if (this.period && this.follow && this.day.isSame(today, 'day')) {
       if (this.plugin.carryHeld(today)) {
@@ -3236,7 +3320,12 @@ class MatrixView extends ItemView {
     for (const t of tasks) grid.appendChild(this.makePeriodCard(t));
     if (!tasks.length && !this.periodTasks.length) {
       const add = grid.createDiv('pm-pcard is-add');
-      add.createSpan({ text: '＋ 添加这一期要推进的主线' });
+      const mig = this.plugin.pendingMigration(this.file.path);
+      add.createSpan({
+        text: mig && mig.to === this.file.path
+          ? `＋ 添加主线 · 上一期没完成的主线会在 ${this.period.month}/${this.period.start} 自动移过来`
+          : '＋ 添加这一期要推进的主线',
+      });
       add.onclick = () => this.newPeriodTask();
     }
   }
@@ -5007,6 +5096,7 @@ class NewPeriodModal extends SkinModal {
         this.end = periodEndFor(moment(v, 'YYYY-MM-DD'), this.plugin.periods()).format('YYYY-MM-DD');
         drawEnd();
         updatePreview();
+        if (this.updateMigNote) this.updateMigNote();
       },
     });
     const endBody = this.field('结束日期');
@@ -5032,7 +5122,15 @@ class NewPeriodModal extends SkinModal {
     cb.checked = this.migrate;
     cb.onchange = () => { this.migrate = cb.checked; };
     lab.createSpan({ text: '把上一期没完成的周期任务移过来' });
-    mig.createDiv({ cls: 'pm-modal-note', text: '没做完的每日任务不用迁移，会在当天自动顺延。' });
+    const migNote = mig.createDiv({ cls: 'pm-modal-note' });
+    this.updateMigNote = () => {
+      const s = moment(this.start, 'YYYY-MM-DD', true);
+      const src = s.isValid() ? this.plugin.migrationSource(s) : null;
+      migNote.setText(this.plugin.migrationDeferred(src, zoneNow().startOf('day'))
+        ? `${src.label} 还没结束，现在不会动它；到 ${s.month() + 1}/${s.date()} 新一期开始时，再把那时没完成的周期任务移过来。没做完的每日任务会自动顺延。`
+        : '没做完的每日任务不用迁移，会在当天自动顺延。');
+    };
+    this.updateMigNote();
 
     this.contentEl.appendChild(preview);
     this.okBtn = this.footer('创建', () => this.create());
@@ -5216,6 +5314,9 @@ module.exports._test = {
   ensureDay,
   insertTaskBlock,
   moveTaskBlock,
+  openPeriodBlocks,
+  insertPeriodBlocks,
+  removePeriodBlocks,
   quadOf,
   quadList,
   spreadY,

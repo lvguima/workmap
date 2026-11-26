@@ -111,6 +111,7 @@ const PERIOD_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})-(\d{1,2})\.md$/;
   agentModel, agentEffort,  // 工作助理的模型和推理强度
   agentCtx,                 // 工作助理带上哪些内容：{ today, yesterday, period, notes }
   brief,                    // 今日简报缓存：{ date, at, model, text, usage }
+  migrations,               // 推迟的周期任务迁移：[{ from, to }]
 }
 ```
 
@@ -205,7 +206,7 @@ app.vault.process(file, data => {
 
 默认日期由 `suggestPeriod` 给出：从今天开始，落在已有的期里就跳到那一期的下一天，直到空出来；结束日用 `periodEndFor`（10 日、20 日或月末，碰到后面已有的期就停在它前一天）。
 
-勾选迁移时，把上一期未完成的周期任务块搬到新笔记的 `{{tasks}}` 位置，并从旧笔记里删掉。`fillTemplate` 先替换 `{{day}}` 再替换 `{{tasks}}`，所以任务文字里的 `{{day}}` 不会被误换；模板里没有 `{{tasks}}` 时，任务放在 `## 周期任务` 下面，没有这一节就加在最前面，避免从旧笔记删掉了却没写进新笔记。第一天的小节：如果今天在新的一期范围内，就是今天，否则是开始日。
+勾选迁移时，把上一期未完成的周期任务块搬到新笔记的 `{{tasks}}` 位置，并从旧笔记里删掉。上一期还没结束时（`migrationDeferred`）不立刻搬，否则这一期的主线会被搬空，只在 `settings.migrations` 里记下 `{ from, to }`；新一期开始后视图渲染时由 `runMigrations` 执行，按编号和文字去重（`insertPeriodBlocks`）。`fillTemplate` 先替换 `{{day}}` 再替换 `{{tasks}}`，所以任务文字里的 `{{day}}` 不会被误换；模板里没有 `{{tasks}}` 时，任务放在 `## 周期任务` 下面，没有这一节就加在最前面，避免从旧笔记删掉了却没写进新笔记。第一天的小节：如果今天在新的一期范围内，就是今天，否则是开始日。
 
 ### 4.7 趣味动画
 

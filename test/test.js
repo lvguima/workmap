@@ -841,9 +841,96 @@ async function agentFlow() {
   }
 }
 
+// ---------- 周期任务迁移 ----------
+{
+  const src = ['## 周期任务', '', '- [ ] A ★★ %%id:pa%%', '  备注 A', '- [x] 做完的 %%id:pd%%', '- [ ] B %%id:pb%%', '', '---', '## 26'];
+  const blocks = T.openPeriodBlocks(src);
+  assert.deepStrictEqual(blocks.map(b => b.block), [['- [ ] A ★★ %%id:pa%%', '  备注 A'], ['- [ ] B %%id:pb%%']]);
+  const dst = ['## 周期任务', '', '- [ ] B %%id:pb%%', '- [ ] 新一期自己加的', '', '---', '## 01'];
+  assert.strictEqual(T.insertPeriodBlocks(dst, blocks), 1); // B 已经在了
+  assert.deepStrictEqual(dst.slice(0, 7), ['## 周期任务', '', '- [ ] B %%id:pb%%', '- [ ] 新一期自己加的', '- [ ] A ★★ %%id:pa%%', '  备注 A', '']);
+  const empty = ['## 周期任务', '', '---'];
+  assert.strictEqual(T.insertPeriodBlocks(empty, blocks), 2);
+  assert.deepStrictEqual(empty, ['## 周期任务', '', '- [ ] A ★★ %%id:pa%%', '  备注 A', '- [ ] B %%id:pb%%', '', '---']);
+  const src2 = src.slice();
+  T.removePeriodBlocks(src2, blocks);
+  assert.deepStrictEqual(src2, ['## 周期任务', '', '- [x] 做完的 %%id:pd%%', '', '---', '## 26']);
+}
+
+// 回归：本期还没结束就新建下一期，不能把本期的周期任务搬空；等新一期开始那天再迁移
+async function migrateFlow() {
+  const RealDate = Date;
+  let fixed = new RealDate('2026-11-26T04:00:00Z').getTime(); // 香港 11/26 中午
+  global.Date = class extends RealDate {
+    constructor(...a) { if (a.length) super(...a); else super(fixed); }
+    static now() { return fixed; }
+  };
+  try {
+    const Plugin = require('../main.js');
+    const files = new Map();
+    const folders = new Set(['2026', '2026/11']);
+    const mkFile = (path, data) => { const f = { path, data, basename: path.split('/').pop().replace(/\.md$/, ''), extension: 'md', stat: { mtime: 1 } }; files.set(path, f); return f; };
+    const cur = mkFile('2026/11/18-30.md', ['## 周期任务', '', '- [ ] 启明星答辩 ★★★ %%id:pk%%', '  还要和杜老师讲一下', '- [x] 报告 %%id:pr%%', '- [ ] TIM ★★★ %%id:pf%%', '', '---', '', '## 26', '- [ ] 启明星：做 ppt %%p:pk%% %%m:75,25%%', ''].join('\n'));
+    const before = cur.data;
+    const pl = new Plugin();
+    pl.app = {
+      vault: {
+        getMarkdownFiles: () => [...files.values()],
+        read: async f => f.data,
+        cachedRead: async f => f.data,
+        process: async (f, fn) => { f.data = fn(f.data); return f.data; },
+        getAbstractFileByPath: p => files.get(p) || (folders.has(p) ? { path: p, children: [] } : null),
+        createFolder: async p => { folders.add(p); },
+        create: async (p, d) => mkFile(p, d),
+      },
+      workspace: { getLeavesOfType: () => [] },
+    };
+    pl.saveData = async () => {};
+    pl.history = [];
+    pl.autoWrites = new Map();
+    pl.settings = { carry: null, carryHold: '', carryStart: '2026-11-18', zone: 'hk', usZone: 'America/Chicago', migrations: [] };
+    pl.loadTemplate = async () => '## 周期任务\n\n{{tasks}}\n\n---\n\n## {{day}}\n';
+    await pl.setZone('hk');
+    const D = x => moment(x, 'YYYY-MM-DD');
+
+    // 11/26 提前新建 12/1-10：本期不动，只记下待迁移
+    const nf = await pl.createPeriod(D('2026-12-01'), D('2026-12-10'), true);
+    assert.strictEqual(cur.data, before);
+    assert.ok(!nf.data.includes('启明星答辩'));
+    assert.deepStrictEqual(pl.settings.migrations, [{ from: '2026/11/18-30.md', to: '2026/12/1-10.md' }]);
+    assert.ok(pl.pendingMigration('2026/12/1-10.md'));
+    // 新一期还没开始：什么都不做
+    assert.strictEqual(await pl.runMigrations(D('2026-11-30')), 0);
+    assert.strictEqual(cur.data, before);
+    assert.strictEqual(pl.settings.migrations.length, 1);
+    // 期间在本期完成了 TIM
+    cur.data = cur.data.replace('- [ ] TIM ★★★ %%id:pf%%', '- [x] TIM ★★★ %%id:pf%%');
+    // 12/1：没完成的（只剩启明星答辩，连同备注）搬过去，做完的留在本期
+    assert.strictEqual(await pl.runMigrations(D('2026-12-01')), 1);
+    assert.ok(nf.data.includes('- [ ] 启明星答辩 ★★★ %%id:pk%%\n  还要和杜老师讲一下'));
+    assert.ok(!nf.data.includes('TIM'));
+    assert.ok(!cur.data.includes('启明星答辩 ★★★'));
+    assert.ok(cur.data.includes('- [x] TIM ★★★ %%id:pf%%'));
+    assert.ok(cur.data.includes('- [x] 报告 %%id:pr%%'));
+    assert.deepStrictEqual(pl.settings.migrations, []);
+    assert.strictEqual(await pl.runMigrations(D('2026-12-02')), 0);
+
+    // 上一期已经结束后再新建：照旧立刻迁移
+    fixed = new RealDate('2026-12-11T04:00:00Z').getTime();
+    nf.data = nf.data.replace('## 周期任务\n', '## 周期任务\n\n- [ ] 没做完的 %%id:px%%\n');
+    const nf2 = await pl.createPeriod(D('2026-12-11'), D('2026-12-20'), true);
+    assert.ok(nf2.data.includes('- [ ] 没做完的 %%id:px%%'));
+    assert.ok(!nf.data.includes('没做完的'));
+    assert.deepStrictEqual(pl.settings.migrations, []);
+  } finally {
+    global.Date = RealDate;
+  }
+}
+
 zoneFlow()
   .then(notesFlow)
   .then(carryScopeFlow)
   .then(agentFlow)
+  .then(migrateFlow)
   .then(() => console.log('ALL PASS'))
   .catch(e => { console.error(e); process.exit(1); });
