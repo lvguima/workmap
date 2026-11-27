@@ -3350,6 +3350,13 @@ class MatrixView extends ItemView {
     const scope = { kind: 'period' };
     const upd = patch => this.plugin.updateTask(this.file, scope, t, patch);
 
+    // 没做完的重要主线带光效。单独用一个元素：::before 是色条，::after 是拖动插入线
+    if (t.level >= 2 && !t.done && !t.cancelled) {
+      const aura = card.createDiv('pm-aura');
+      // 视图重画时按时钟对齐相位（12 秒是各动画周期的公倍数），光效不会跳回起点
+      aura.style.setProperty('--pm-aura-delay', `-${Date.now() % 12000}ms`);
+    }
+
     const head = card.createDiv('pm-pcard-head');
     const chk = buildCheck(head, t.done, (v, el) => this.setDone(scope, t, v, el));
     if (this.popMatch(t)) this.replayPop(chk, card);
@@ -5203,7 +5210,7 @@ class MatrixSettingTab extends PluginSettingTab {
         }));
     new Setting(containerEl)
       .setName('趣味动画')
-      .setDesc('完成时的弹跳、粒子和彩带，「马上做」的火苗。系统开启「减弱动态效果」时会自动关闭。')
+      .setDesc('完成时的弹跳、粒子和彩带，「马上做」的火苗，重要主线的边框光效。系统开启「减弱动态效果」时会自动关闭。')
       .addToggle(tg => tg.setValue(!!s.fx).onChange(async v => {
         s.fx = v;
         await this.plugin.saveSettings();

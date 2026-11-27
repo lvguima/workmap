@@ -3318,3 +3318,82 @@
   .pm-skin .pm-ag-hint.is-wait,
   .pm-skin .pm-ag-dots { animation: none !important; }
 }
+
+/* =========================================================
+   重要主线的光效：三星 = 流光 + 呼吸光晕，二星 = 淡的慢呼吸
+   只在「趣味动画」开启时显示
+   ========================================================= */
+
+@property --pm-aura-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.pm-skin .pm-aura { display: none; }
+
+.pm-skin.pm-fx .pm-aura {
+  display: block;
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* 光晕：阴影本身不动，只改透明度，开销小 */
+.pm-skin.pm-fx .pm-aura::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  animation: pm-aura-breathe 6s ease-in-out var(--pm-aura-delay, 0s) infinite;
+}
+
+.pm-skin.pm-fx .pm-pcard[data-level="2"] .pm-aura::before {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--pm-lv2) 38%, transparent),
+    0 0 14px 1px color-mix(in srgb, var(--pm-lv2) 28%, transparent);
+}
+
+.pm-skin.pm-fx .pm-pcard[data-level="3"] .pm-aura::before {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--pm-lv3) 50%, transparent),
+    0 0 14px 2px color-mix(in srgb, var(--pm-lv3) 55%, transparent),
+    0 0 30px 4px color-mix(in srgb, var(--pm-star) 24%, transparent);
+  animation-duration: 3s;
+}
+
+/* 流光：锥形渐变绕圈转，用遮罩只露出 2px 的边框 */
+.pm-skin.pm-fx .pm-pcard[data-level="3"] .pm-aura::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 2px;
+  border-radius: inherit;
+  background: conic-gradient(from var(--pm-aura-angle),
+    transparent 0deg,
+    transparent 200deg,
+    var(--pm-lv3) 290deg,
+    var(--pm-star) 335deg,
+    #ffe9a8 352deg,
+    transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  animation: pm-aura-spin 4s linear var(--pm-aura-delay, 0s) infinite;
+}
+
+@keyframes pm-aura-breathe {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+@keyframes pm-aura-spin {
+  to { --pm-aura-angle: 360deg; }
+}
+
+.pm-ghost-host .pm-ghost .pm-aura { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-skin.pm-fx .pm-aura { display: none; }
+}
